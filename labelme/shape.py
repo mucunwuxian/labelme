@@ -176,7 +176,7 @@ class Shape:
         if self.mask is None and not self.points:
             return
 
-        color = self.select_line_color if self.selected else self.line_color
+        color = self.line_color  # Always use line_color, selection is shown by fill
         pen = QtGui.QPen(color)
         # Try using integer sizes for smoother drawing(?)
         pen.setWidth(self.PEN_WIDTH)
