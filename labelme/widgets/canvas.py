@@ -445,9 +445,16 @@ class Canvas(QtWidgets.QWidget):
         # - Highlight vertex
         # Update shape/vertex fill and tooltip value accordingly.
         status_messages: list[str] = []
-        for shape in ([self.hShape] if self.hShape else []) + [
-            s for s in reversed(self.shapes) if self.isVisible(s) and s != self.hShape
-        ]:
+        # Sort by area ascending (smallest first), points always first
+        # This ensures smaller objects and points get priority for hover
+        sorted_shapes = sorted(
+            [s for s in self.shapes if self.isVisible(s)],
+            key=lambda s: (
+                0 if s.shape_type == "point" else 1,
+                s.boundingRect().width() * s.boundingRect().height(),
+            ),
+        )
+        for shape in sorted_shapes:
             # Look for a nearby vertex to highlight. If that fails,
             # check if we happen to be inside a shape.
             index = shape.nearestVertex(pos, self.epsilon)
@@ -716,8 +723,9 @@ class Canvas(QtWidgets.QWidget):
         """Select the first shape created which contains this point."""
         if self.hVertex is not None:
             assert self.hShape is not None
-            # For point shapes, select the shape instead of highlighting the vertex
+            # For point shapes, select the shape and highlight the vertex
             if self.hShape.shape_type == "point":
+                self.hShape.highlightVertex(i=self.hVertex, action=self.hShape.MOVE_VERTEX)
                 self.setHiding()
                 if self.hShape not in self.selectedShapes:
                     if multiple_selection_mode:
@@ -732,7 +740,16 @@ class Canvas(QtWidgets.QWidget):
             self.hShape.highlightVertex(i=self.hVertex, action=self.hShape.MOVE_VERTEX)
         else:
             shape: Shape
-            for shape in reversed(self.shapes):
+            # Sort by area ascending (smallest first), points always first
+            # This ensures smaller objects are selected over larger ones
+            sorted_shapes = sorted(
+                self.shapes,
+                key=lambda s: (
+                    0 if s.shape_type == "point" else 1,
+                    s.boundingRect().width() * s.boundingRect().height(),
+                ),
+            )
+            for shape in sorted_shapes:
                 if self.isVisible(shape) and shape.containsPoint(point):
                     self.setHiding()
                     if shape not in self.selectedShapes:
@@ -877,7 +894,16 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
-        for shape in self.shapes:
+        # Sort shapes: largest first, but points always on top
+        # Key: (is_point, -area) - points get (1, x), others get (0, -area)
+        sorted_shapes = sorted(
+            self.shapes,
+            key=lambda s: (
+                1 if s.shape_type == "point" else 0,
+                -(s.boundingRect().width() * s.boundingRect().height()),
+            ),
+        )
+        for shape in sorted_shapes:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 shape.paint(p)
@@ -1166,12 +1192,22 @@ class Canvas(QtWidgets.QWidget):
             self.shapes = list(shapes)
         else:
             self.shapes.extend(shapes)
+        self.sortShapesByArea()
         self.storeShapes()
         self.current = None
         self.hShape = None
         self.hVertex = None
         self.hEdge = None
         self.update()
+
+    def sortShapesByArea(self):
+        """Sort shapes so smaller objects are on top (drawn last), points always on top."""
+        self.shapes.sort(
+            key=lambda s: (
+                1 if s.shape_type == "point" else 0,
+                -(s.boundingRect().width() * s.boundingRect().height()),
+            ),
+        )
 
     def setShapeVisible(self, shape, value):
         self.visible[shape] = value

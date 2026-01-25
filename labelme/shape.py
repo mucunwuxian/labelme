@@ -25,11 +25,11 @@ class Shape:
     # Flag for all other handles on the current shape
     NEAR_VERTEX = 1
 
-    PEN_WIDTH = 2
+    PEN_WIDTH = 5
 
     # The following class variables influence the drawing of all shape objects.
-    line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 128)
-    fill_color: QtGui.QColor = QtGui.QColor(0, 0, 0, 64)
+    line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 102)  # 60% transparency
+    fill_color: QtGui.QColor = QtGui.QColor(0, 0, 0, 51)  # 80% transparency
     vertex_fill_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 255)
     select_line_color: QtGui.QColor = QtGui.QColor(255, 255, 255, 255)
     select_fill_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 64)

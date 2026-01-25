@@ -550,6 +550,16 @@ Polygons</source>
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Opacity</source>
+        <translation>透明度</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Line Width</source>
+        <translation>線の太さ</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>Zoom in or out of the image. Also accessible with {} and {} from the canvas.</source>
         <translation>画像を拡大・縮小します。キャンバス上で {} と {} も使用できます。</translation>
     </message>
