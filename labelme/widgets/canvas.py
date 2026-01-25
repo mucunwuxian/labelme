@@ -138,6 +138,10 @@ class Canvas(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.WheelFocus)
 
+        # Enable pinch-to-zoom gesture (Mac trackpad support)
+        self.grabGesture(Qt.PinchGesture)
+        self.setAttribute(Qt.WA_AcceptTouchEvents)
+
     def fillDrawing(self):
         return self._fill_drawing
 
@@ -1046,6 +1050,29 @@ class Canvas(QtWidgets.QWidget):
             self.scrollRequest.emit(delta.x(), Qt.Horizontal)
             self.scrollRequest.emit(delta.y(), Qt.Vertical)
         a0.accept()
+
+    def event(self, a0: QtCore.QEvent) -> bool:
+        """Handle gesture events for pinch-to-zoom on Mac trackpad."""
+        if a0.type() == QtCore.QEvent.Gesture:
+            return self._gestureEvent(a0)
+        return super().event(a0)
+
+    def _gestureEvent(self, a0: QtGui.QGestureEvent) -> bool:
+        """Process pinch gesture for zooming."""
+        pinch: QtWidgets.QPinchGesture = a0.gesture(Qt.PinchGesture)
+        if pinch:
+            if pinch.state() == Qt.GestureUpdated:
+                # scaleFactor is relative to previous state (>1 = zoom in, <1 = zoom out)
+                scale_factor = pinch.scaleFactor()
+                # Ignore very small changes to prevent jitter
+                if abs(scale_factor - 1.0) < 0.005:
+                    return True
+                # Convert to delta similar to wheel event
+                delta = (scale_factor - 1.0) * 240
+                center = pinch.centerPoint()
+                self.zoomRequest.emit(int(delta), center)
+            return True
+        return False
 
     def moveByKeyboard(self, offset):
         if self.selectedShapes:
