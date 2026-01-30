@@ -211,16 +211,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # Opacity spinbox for polygon fill
         self.opacityWidget = QtWidgets.QSpinBox()
         self.opacityWidget.setRange(0, 100)
-        self.opacityWidget.setValue(60)  # Default 60% transparency (alpha 102/255)
         self.opacityWidget.setSuffix(" %")
         self.opacityWidget.valueChanged.connect(self._opacity_changed)
+        self.opacityWidget.setValue(60)  # Default 60% transparency (alpha 102/255)
 
         # Line width spinbox
         self.lineWidthWidget = QtWidgets.QSpinBox()
         self.lineWidthWidget.setRange(1, 10)
-        self.lineWidthWidget.setValue(5)  # Default line width
         self.lineWidthWidget.setSuffix(" px")
         self.lineWidthWidget.valueChanged.connect(self._line_width_changed)
+        self.lineWidthWidget.setValue(5)  # Default line width
 
         self.setAcceptDrops(True)
 
@@ -1445,7 +1445,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_shape_color(self, shape):
         r, g, b = self._get_rgb_by_label(shape.label)
-        shape.line_color = QtGui.QColor(r, g, b)
+        # Apply current opacity setting to line color
+        opacity = self.opacityWidget.value()
+        alpha = int((100 - opacity) * 255 / 100)
+        shape.line_color = QtGui.QColor(r, g, b, alpha)
         shape.vertex_fill_color = QtGui.QColor(r, g, b)
         shape.hvertex_fill_color = QtGui.QColor(255, 255, 255)
         shape.fill_color = QtGui.QColor(r, g, b, 128)
@@ -1736,16 +1739,18 @@ class MainWindow(QtWidgets.QMainWindow):
         alpha = int((100 - value) * 255 / 100)
         # Update class-level default line color
         Shape.line_color.setAlpha(alpha)
-        # Update existing shapes (only if they have instance-level line_color)
-        for shape in self.canvas.shapes:
-            if "line_color" in shape.__dict__:
-                shape.line_color.setAlpha(alpha)
-        self.canvas.update()
+        # Update existing shapes (only if canvas exists and they have instance-level line_color)
+        if hasattr(self, "canvas") and self.canvas is not None:
+            for shape in self.canvas.shapes:
+                if "line_color" in shape.__dict__:
+                    shape.line_color.setAlpha(alpha)
+            self.canvas.update()
 
     def _line_width_changed(self, value: int) -> None:
         """Update line width for all shapes."""
         Shape.PEN_WIDTH = value
-        self.canvas.update()
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.update()
 
     def setFitWindow(self, value=True):
         if value:
