@@ -1075,8 +1075,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"[{self.fileListWidget.currentRow() + 1}"
                     f"/{self.fileListWidget.count()}]"
                 )
+            # Add JSON last modified time
+            label_file = f"{osp.splitext(self.imagePath)[0]}.json"
+            if self.output_dir:
+                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            if osp.exists(label_file):
+                import datetime
+                mtime = osp.getmtime(label_file)
+                mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                window_title = f"{window_title} | {self.tr('Last saved')}: {mtime_str}"
         if dirty:
-            window_title = f"{window_title}*"
+            window_title = f"{window_title} | {self.tr('Editing')}"
         return window_title
 
     def setDirty(self):

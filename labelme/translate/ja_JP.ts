@@ -560,6 +560,16 @@ Polygons</source>
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Last saved</source>
+        <translation>最終保存</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Editing</source>
+        <translation>編集中</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>Zoom in or out of the image. Also accessible with {} and {} from the canvas.</source>
         <translation>画像を拡大・縮小します。キャンバス上で {} と {} も使用できます。</translation>
     </message>
