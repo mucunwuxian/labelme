@@ -19,13 +19,25 @@ class Shape:
     # Render handles as circles
     P_ROUND = 1
 
+    # Render handles as capsule (for edge midpoints)
+    P_CAPSULE = 2
+
     # Flag for the handles we would move if dragging
     MOVE_VERTEX = 0
 
     # Flag for all other handles on the current shape
     NEAR_VERTEX = 1
 
+    # Edge midpoint indices for rectangle (used for edge dragging)
+    EDGE_TOP = 0
+    EDGE_BOTTOM = 1
+    EDGE_LEFT = 2
+    EDGE_RIGHT = 3
+
     PEN_WIDTH = 5
+
+    # Minimum rectangle size (in pixels) to show edge midpoints
+    MIN_RECT_SIZE_FOR_EDGE_HANDLES = 20
 
     # The following class variables influence the drawing of all shape objects.
     line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 102)  # 60% transparency
@@ -72,6 +84,7 @@ class Shape:
             self.NEAR_VERTEX: (4, self.P_ROUND),
             self.MOVE_VERTEX: (1.5, self.P_SQUARE),
         }
+        self._highlightEdgeMidpoint = None  # For rectangle edge midpoint highlighting
 
         self._closed = False
 
@@ -228,6 +241,25 @@ class Shape:
                 if self.shape_type == "rectangle":
                     for i in range(len(self.points)):
                         self.drawVertex(vrtx_path, i)
+                    # Draw edge midpoint handles for rectangle
+                    midpoints = self.getRectEdgeMidpoints()
+                    if midpoints:
+                        self.drawEdgeMidpoint(
+                            painter, midpoints["top"], is_horizontal=True,
+                            highlighted=(self._highlightEdgeMidpoint == self.EDGE_TOP)
+                        )
+                        self.drawEdgeMidpoint(
+                            painter, midpoints["bottom"], is_horizontal=True,
+                            highlighted=(self._highlightEdgeMidpoint == self.EDGE_BOTTOM)
+                        )
+                        self.drawEdgeMidpoint(
+                            painter, midpoints["left"], is_horizontal=False,
+                            highlighted=(self._highlightEdgeMidpoint == self.EDGE_LEFT)
+                        )
+                        self.drawEdgeMidpoint(
+                            painter, midpoints["right"], is_horizontal=False,
+                            highlighted=(self._highlightEdgeMidpoint == self.EDGE_RIGHT)
+                        )
             elif self.shape_type == "circle":
                 assert len(self.points) in [1, 2]
                 if len(self.points) == 2:
@@ -306,6 +338,102 @@ class Shape:
         else:
             assert False, "unsupported vertex shape"
 
+    def getRectEdgeMidpoints(self):
+        """Get the midpoints of rectangle edges.
+        Returns dict with keys: 'top', 'bottom', 'left', 'right'
+        """
+        if self.shape_type != "rectangle" or len(self.points) != 2:
+            return None
+        p0, p1 = self.points[0], self.points[1]
+        left = min(p0.x(), p1.x())
+        right = max(p0.x(), p1.x())
+        top = min(p0.y(), p1.y())
+        bottom = max(p0.y(), p1.y())
+        return {
+            "top": QtCore.QPointF((left + right) / 2, top),
+            "bottom": QtCore.QPointF((left + right) / 2, bottom),
+            "left": QtCore.QPointF(left, (top + bottom) / 2),
+            "right": QtCore.QPointF(right, (top + bottom) / 2),
+        }
+
+    def drawEdgeMidpoint(self, painter, point, is_horizontal, highlighted=False):
+        """Draw a capsule-shaped handle at edge midpoint."""
+        # Check if rectangle is large enough to show edge handles
+        if len(self.points) != 2:
+            return
+        p0, p1 = self.points[0], self.points[1]
+        width = abs(p1.x() - p0.x()) * self.scale
+        height = abs(p1.y() - p0.y()) * self.scale
+        if width < self.MIN_RECT_SIZE_FOR_EDGE_HANDLES or height < self.MIN_RECT_SIZE_FOR_EDGE_HANDLES:
+            return
+
+        # Save painter state to restore later
+        painter.save()
+
+        scaled_point = self._scale_point(point)
+        # Capsule dimensions
+        if is_horizontal:
+            w, h = 16, 6  # horizontal capsule for top/bottom edges
+        else:
+            w, h = 6, 16  # vertical capsule for left/right edges
+
+        if highlighted:
+            color = self.hvertex_fill_color
+        else:
+            color = self.vertex_fill_color
+
+        painter.setBrush(color)
+        painter.setPen(QtGui.QPen(color))
+
+        # Draw capsule (rounded rectangle)
+        rect = QtCore.QRectF(
+            scaled_point.x() - w / 2,
+            scaled_point.y() - h / 2,
+            w, h
+        )
+        painter.drawRoundedRect(rect, h / 2, h / 2)
+
+        # Restore painter state
+        painter.restore()
+
+    def nearestEdgeMidpoint(self, point, epsilon):
+        """Find the nearest edge midpoint for rectangle shapes.
+        Returns edge index (EDGE_TOP, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT) or None.
+        """
+        if self.shape_type != "rectangle" or len(self.points) != 2:
+            return None
+
+        # Check if rectangle is large enough
+        p0, p1 = self.points[0], self.points[1]
+        width = abs(p1.x() - p0.x()) * self.scale
+        height = abs(p1.y() - p0.y()) * self.scale
+        if width < self.MIN_RECT_SIZE_FOR_EDGE_HANDLES or height < self.MIN_RECT_SIZE_FOR_EDGE_HANDLES:
+            return None
+
+        midpoints = self.getRectEdgeMidpoints()
+        if not midpoints:
+            return None
+
+        point_scaled = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
+        min_distance = float("inf")
+        min_edge = None
+
+        edge_map = {
+            "top": self.EDGE_TOP,
+            "bottom": self.EDGE_BOTTOM,
+            "left": self.EDGE_LEFT,
+            "right": self.EDGE_RIGHT,
+        }
+
+        for edge_name, midpoint in midpoints.items():
+            mp_scaled = QtCore.QPointF(midpoint.x() * self.scale, midpoint.y() * self.scale)
+            dist = labelme.utils.distance(mp_scaled - point_scaled)
+            if dist <= epsilon and dist < min_distance:
+                min_distance = dist
+                min_edge = edge_map[edge_name]
+
+        return min_edge
+
     def nearestVertex(self, point, epsilon):
         min_distance = float("inf")
         min_i = None
@@ -383,6 +511,43 @@ class Shape:
     def moveVertexBy(self, i, offset):
         self.points[i] = self.points[i] + offset
 
+    def moveEdgeBy(self, edge_index, offset):
+        """Move a rectangle edge by offset.
+
+        Args:
+            edge_index (int): The edge index (EDGE_TOP, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT)
+            offset (QPointF): The offset to move
+        """
+        if self.shape_type != "rectangle" or len(self.points) != 2:
+            return
+
+        p0, p1 = self.points[0], self.points[1]
+
+        if edge_index == self.EDGE_TOP:
+            # Move top edge (adjust y of the point with smaller y)
+            if p0.y() < p1.y():
+                self.points[0] = QtCore.QPointF(p0.x(), p0.y() + offset.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x(), p1.y() + offset.y())
+        elif edge_index == self.EDGE_BOTTOM:
+            # Move bottom edge (adjust y of the point with larger y)
+            if p0.y() > p1.y():
+                self.points[0] = QtCore.QPointF(p0.x(), p0.y() + offset.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x(), p1.y() + offset.y())
+        elif edge_index == self.EDGE_LEFT:
+            # Move left edge (adjust x of the point with smaller x)
+            if p0.x() < p1.x():
+                self.points[0] = QtCore.QPointF(p0.x() + offset.x(), p0.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x() + offset.x(), p1.y())
+        elif edge_index == self.EDGE_RIGHT:
+            # Move right edge (adjust x of the point with larger x)
+            if p0.x() > p1.x():
+                self.points[0] = QtCore.QPointF(p0.x() + offset.x(), p0.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x() + offset.x(), p1.y())
+
     def highlightVertex(self, i, action):
         """Highlight a vertex appropriately based on the current action
 
@@ -393,10 +558,21 @@ class Shape:
         """
         self._highlightIndex = i
         self._highlightMode = action
+        self._highlightEdgeMidpoint = None  # Clear edge midpoint highlight
+
+    def highlightEdgeMidpoint(self, edge_index):
+        """Highlight an edge midpoint for rectangle shapes.
+
+        Args:
+            edge_index (int): The edge index (EDGE_TOP, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT)
+        """
+        self._highlightEdgeMidpoint = edge_index
+        self._highlightIndex = None  # Clear vertex highlight
 
     def highlightClear(self):
         """Clear the highlighted point"""
         self._highlightIndex = None
+        self._highlightEdgeMidpoint = None
 
     def copy(self):
         return copy.deepcopy(self)

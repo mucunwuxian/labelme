@@ -273,7 +273,9 @@ class Canvas(QtWidgets.QWidget):
         self.prevhShape = self.hShape
         self.prevhVertex = self.hVertex
         self.prevhEdge = self.hEdge
+        self.prevhEdgeMidpoint = self.hEdgeMidpoint
         self.hShape = self.hVertex = self.hEdge = None
+        self.hEdgeMidpoint = None
 
     def selectedVertex(self):
         return self.hVertex is not None
@@ -433,6 +435,11 @@ class Canvas(QtWidgets.QWidget):
                 self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
                 self.repaint()
                 self.movingShape = True
+            elif self.hEdgeMidpoint is not None and self.hShape is not None:
+                # Moving rectangle edge midpoint
+                self.boundedMoveEdge(pos)
+                self.repaint()
+                self.movingShape = True
             elif self.selectedShapes and self.prevPoint is not None:
                 self.overrideCursor(CURSOR_MOVE)
                 self.boundedMoveShapes(self.selectedShapes, pos)
@@ -484,6 +491,20 @@ class Canvas(QtWidgets.QWidget):
                 self.prevhEdge = self.hEdge = index_edge
                 self.overrideCursor(CURSOR_POINT)
                 status_messages.append(self.tr("ALT + Click to create point on shape"))
+                self.update()
+                break
+            # Check for rectangle edge midpoint
+            edge_midpoint = shape.nearestEdgeMidpoint(pos, self.epsilon)
+            if edge_midpoint is not None:
+                if self.selectedVertex() and self.hShape:
+                    self.hShape.highlightClear()
+                self.prevhVertex = self.hVertex
+                self.hVertex = None
+                self.prevhShape = self.hShape = shape
+                self.prevhEdgeMidpoint = self.hEdgeMidpoint = edge_midpoint
+                shape.highlightEdgeMidpoint(edge_midpoint)
+                self.overrideCursor(CURSOR_POINT)
+                status_messages.append(self.tr("Click & drag to resize rectangle"))
                 self.update()
                 break
             elif shape.containsPoint(pos):
@@ -803,6 +824,22 @@ class Canvas(QtWidgets.QWidget):
             )
 
         self.hShape.moveVertexBy(i=self.hVertex, offset=pos - point)
+
+    def boundedMoveEdge(self, pos: QPointF) -> None:
+        """Move a rectangle edge to resize the rectangle."""
+        if self.hEdgeMidpoint is None or self.hShape is None:
+            return
+
+        if self.outOfPixmap(pos):
+            return
+
+        if self.prevPoint is None:
+            self.prevPoint = pos
+            return
+
+        dp = pos - self.prevPoint
+        self.hShape.moveEdgeBy(self.hEdgeMidpoint, dp)
+        self.prevPoint = pos
 
     def boundedMoveShapes(self, shapes, pos):
         if self.outOfPixmap(pos):
@@ -1240,6 +1277,8 @@ class Canvas(QtWidgets.QWidget):
         self.prevhVertex = None
         self.hEdge = None
         self.prevhEdge = None
+        self.hEdgeMidpoint = None  # For rectangle edge midpoint hovering
+        self.prevhEdgeMidpoint = None
         self.update()
 
 

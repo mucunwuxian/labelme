@@ -569,6 +569,11 @@ Polygons</source>
         <translation>編集中</translation>
     </message>
     <message>
+        <location filename="../widgets/canvas.py" line="0"/>
+        <source>Click &amp; drag to resize rectangle</source>
+        <translation>クリック＆ドラッグで矩形をリサイズ</translation>
+    </message>
+    <message>
         <location filename="../app.py" line="0"/>
         <source>Zoom in or out of the image. Also accessible with {} and {} from the canvas.</source>
         <translation>画像を拡大・縮小します。キャンバス上で {} と {} も使用できます。</translation>
