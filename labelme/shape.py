@@ -286,6 +286,9 @@ class Shape:
         d = self.point_size
         shape = self.point_type
         point = self._scale_point(self.points[i])
+        # Point shapes use larger size (16) for better visibility
+        if self.shape_type == "point":
+            d = 16
         if i == self._highlightIndex:
             size, shape = self._highlightSettings[self._highlightMode]
             d *= size  # type: ignore[assignment]
