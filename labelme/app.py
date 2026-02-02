@@ -65,7 +65,16 @@ if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
 
-LABEL_COLORMAP: NDArray[np.uint8] = imgviz.label_colormap()
+# Use matplotlib's tab20 colormap for label colors
+# Reorder: dark colors first (even indices), then light colors (odd indices)
+import matplotlib.pyplot as plt
+_tab20_cmap = plt.cm.get_cmap("tab20")
+_dark_colors = [_tab20_cmap(i / 20)[:3] for i in range(0, 20, 2)]  # 0,2,4,...,18
+_light_colors = [_tab20_cmap(i / 20)[:3] for i in range(1, 20, 2)]  # 1,3,5,...,19
+LABEL_COLORMAP: NDArray[np.uint8] = np.array(
+    _dark_colors + _light_colors, dtype=np.float32
+) * 255
+LABEL_COLORMAP = LABEL_COLORMAP.astype(np.uint8)
 
 
 class _ZoomMode(enum.Enum):
@@ -1473,7 +1482,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else self.uniqLabelList.count()
             )
             label_id: int = (
-                1  # skip black color by default
+                0  # tab20 has no black, start from index 0
                 + item_index
                 + self._config["shift_auto_shape_color"]
             )

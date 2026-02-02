@@ -759,6 +759,11 @@ class Canvas(QtWidgets.QWidget):
                 self.calculateOffsets(point)
                 return
             self.hShape.highlightVertex(i=self.hVertex, action=self.hShape.MOVE_VERTEX)
+        elif self.hEdgeMidpoint is not None:
+            # For rectangle edge midpoint, keep the highlight
+            assert self.hShape is not None
+            self.hShape.highlightEdgeMidpoint(self.hEdgeMidpoint)
+            return
         else:
             shape: Shape
             # Sort by area ascending (smallest first), points always first

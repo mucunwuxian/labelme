@@ -378,20 +378,28 @@ class Shape:
             w, h = 6, 16  # vertical capsule for left/right edges
 
         if highlighted:
-            color = self.hvertex_fill_color
+            fill_color = self.hvertex_fill_color
+            # Enlarge when highlighted (same as vertex highlight)
+            w *= 1.5
+            h *= 1.5
         else:
-            color = self.vertex_fill_color
+            fill_color = self.vertex_fill_color
+        border_color = self.line_color  # Same as shape's line color
 
-        painter.setBrush(color)
-        painter.setPen(QtGui.QPen(color))
+        painter.setBrush(fill_color)
+        painter.setPen(QtGui.QPen(border_color, 2))  # Thicker border like corner points
 
-        # Draw capsule (rounded rectangle)
         rect = QtCore.QRectF(
             scaled_point.x() - w / 2,
             scaled_point.y() - h / 2,
             w, h
         )
-        painter.drawRoundedRect(rect, h / 2, h / 2)
+        if highlighted:
+            # Draw rectangle with square corners when highlighted
+            painter.drawRect(rect)
+        else:
+            # Draw capsule (rounded rectangle) when not highlighted
+            painter.drawRoundedRect(rect, h / 2, h / 2)
 
         # Restore painter state
         painter.restore()
