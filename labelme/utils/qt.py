@@ -9,11 +9,28 @@ from PyQt5 import QtWidgets
 here = osp.dirname(osp.abspath(__file__))
 
 
-def newIcon(icon_file_name: str) -> QtGui.QIcon:
+def newIcon(icon_file_name: str, disabled_opacity: float = 0.3) -> QtGui.QIcon:
     if osp.splitext(icon_file_name)[1] == "":
         icon_file_name = f"{icon_file_name}.png"  # XXX: convention
     icons_dir: str = osp.join(here, "../icons")
-    return QtGui.QIcon(osp.join(":/", icons_dir, icon_file_name))
+    icon_path = osp.join(":/", icons_dir, icon_file_name)
+    icon = QtGui.QIcon(icon_path)
+
+    # Add disabled (grayed out) mode for the icon
+    sizes = [16, 24, 32, 48, 64]
+    for size in sizes:
+        pixmap = icon.pixmap(size, size, QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        if not pixmap.isNull():
+            # Create grayed out version
+            disabled_pixmap = QtGui.QPixmap(pixmap.size())
+            disabled_pixmap.fill(QtCore.Qt.transparent)
+            painter = QtGui.QPainter(disabled_pixmap)
+            painter.setOpacity(disabled_opacity)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            icon.addPixmap(disabled_pixmap, QtGui.QIcon.Disabled, QtGui.QIcon.Off)
+
+    return icon
 
 
 def newButton(text, icon=None, slot=None):
@@ -35,12 +52,13 @@ def newAction(
     checkable=False,
     enabled=True,
     checked=False,
+    disabled_opacity: float = 0.3,
 ):
     """Create a new action and assign callbacks, shortcuts, etc."""
     a = QtWidgets.QAction(text, parent)
     if icon is not None:
         a.setIconText(text.replace(" ", "\n"))
-        a.setIcon(newIcon(icon))
+        a.setIcon(newIcon(icon, disabled_opacity=disabled_opacity))
     if shortcut is not None:
         if isinstance(shortcut, list | tuple):
             a.setShortcuts(shortcut)

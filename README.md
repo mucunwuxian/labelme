@@ -119,6 +119,28 @@ labelme data_annotated/ --labels labels.txt  # specify label list with a file
 - **How to get annotations for semantic segmentation?** See [examples/semantic_segmentation](examples/semantic_segmentation).
 - **How to get annotations for instance segmentation?** See [examples/instance_segmentation](examples/instance_segmentation).
 
+### Troubleshooting
+
+- **How to reset toolbar position?**
+
+  If the toolbar layout is broken, delete the settings file to reset:
+
+  **macOS:**
+  ```bash
+  rm ~/Library/Preferences/com.labelme.labelme.plist
+  ```
+
+  **Windows:**
+  Delete via Registry Editor:
+  ```
+  HKEY_CURRENT_USER\Software\labelme\labelme
+  ```
+
+  **Linux:**
+  ```bash
+  rm ~/.config/labelme/labelme.conf
+  ```
+
 
 ## Examples
 

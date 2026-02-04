@@ -277,6 +277,38 @@
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Export
+&amp;Report</source>
+        <translation>レポート
+出力(&amp;R)</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Export annotation report to CSV</source>
+        <translation>アノテーションレポートをCSVに出力</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Export File List</source>
+        <translation>レポート出力</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>File list exported to %s</source>
+        <translation>レポートを %s に出力しました</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Export Error</source>
+        <translation>出力エラー</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Failed to export file list: %s</source>
+        <translation>レポートの出力に失敗しました: %s</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>&amp;Change Output Dir</source>
         <translation>出力先を変更(&amp;C)</translation>
     </message>

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import csv
+import datetime
 import enum
 import functools
 import html
+import json
 import math
 import os
 import os.path as osp
@@ -349,6 +352,16 @@ class MainWindow(QtWidgets.QMainWindow):
             icon="file-x.svg",
             tip=self.tr("Delete current label file"),
             enabled=False,
+        )
+
+        exportFileList = action(
+            self.tr("Export\n&Report"),
+            self.exportFileList,
+            None,
+            icon="table-export.svg",
+            tip=self.tr("Export annotation report to CSV"),
+            enabled=False,
+            disabled_opacity=0.6,
         )
 
         changeOutputDir = action(
@@ -726,6 +739,7 @@ class MainWindow(QtWidgets.QMainWindow):
             open=open_,
             close=close,
             deleteFile=deleteFile,
+            exportFileList=exportFileList,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             toggle_keep_prev_brightness_contrast=action(
                 text=self.tr("Keep Previous Brightness/Contrast"),
@@ -928,6 +942,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     openNextImg,
                     save,
                     deleteFile,
+                    exportFileList,
                     None,
                     editMode,
                     duplicate,
@@ -1005,6 +1020,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # or simply:
         # self.restoreGeometry(settings['window/geometry'])
         self.restoreState(state)
+
+        # Restore opacity and line width settings
+        opacity = self.settings.value("canvas/opacity", 60, type=int)
+        lineWidth = self.settings.value("canvas/lineWidth", 5, type=int)
+        self.opacityWidget.setValue(opacity)
+        self.lineWidthWidget.setValue(lineWidth)
 
         if filename:
             if osp.isdir(filename):
@@ -2000,6 +2021,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("window/position", self.pos())
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("recentFiles", self.recentFiles)
+        self.settings.setValue("canvas/opacity", self.opacityWidget.value())
+        self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
 
@@ -2196,6 +2219,122 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setCheckState(Qt.Unchecked)
 
             self.resetState()
+
+    def exportFileList(self):
+        """Export file list to CSV with image info and annotation status."""
+        if not self.imageList:
+            return
+
+        # Ask for save location
+        default_name = "file_list.csv"
+        if self._prev_opened_dir:
+            default_path = osp.join(self._prev_opened_dir, default_name)
+        else:
+            default_path = default_name
+
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export File List"),
+            default_path,
+            self.tr("CSV files (*.csv)"),
+        )
+        if not filename:
+            return
+
+        # Collect data for each image
+        rows = []
+        for image_path in self.imageList:
+            row = self._get_file_info(image_path)
+            rows.append(row)
+
+        # Write CSV
+        headers = [
+            "filename",
+            "width",
+            "height",
+            "has_annotation",
+            "annotation_modified",
+            "num_shapes",
+            "shape_types",
+            "labels",
+        ]
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(rows)
+            logger.info(f"File list exported to: {filename}")
+            self.show_status_message(self.tr("File list exported to %s") % filename)
+        except Exception as e:
+            self.errorMessage(
+                self.tr("Export Error"),
+                self.tr("Failed to export file list: %s") % str(e),
+            )
+
+    def _get_file_info(self, image_path: str) -> list:
+        """Get information about an image file for CSV export."""
+        filename = osp.basename(image_path)
+
+        # Get image dimensions
+        width, height = "", ""
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as img:
+                width, height = img.size
+        except Exception:
+            pass
+
+        # Check for annotation file
+        label_file = f"{osp.splitext(image_path)[0]}.json"
+        if self.output_dir:
+            label_file = osp.join(self.output_dir, osp.basename(label_file))
+
+        has_annotation = "No"
+        annotation_modified = ""
+        num_shapes = 0
+        shape_types = ""
+        labels = ""
+
+        if osp.exists(label_file):
+            has_annotation = "Yes"
+            try:
+                mtime = osp.getmtime(label_file)
+                annotation_modified = datetime.datetime.fromtimestamp(mtime).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+                # Read JSON to get shape info
+                with open(label_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                    shapes = data.get("shapes", [])
+                    num_shapes = len(shapes)
+
+                    # Count shape types
+                    type_counts: dict[str, int] = {}
+                    label_set: set[str] = set()
+                    for shape in shapes:
+                        stype = shape.get("shape_type", "unknown")
+                        type_counts[stype] = type_counts.get(stype, 0) + 1
+                        label_set.add(shape.get("label", ""))
+
+                    shape_types = ", ".join(
+                        f"{t}:{c}" for t, c in sorted(type_counts.items())
+                    )
+                    labels = ", ".join(sorted(label_set))
+            except Exception:
+                pass
+
+        return [
+            filename,
+            width,
+            height,
+            has_annotation,
+            annotation_modified,
+            num_shapes,
+            shape_types,
+            labels,
+        ]
 
     def _open_config_file(self) -> None:
         if self._config_file is None:
@@ -2394,6 +2533,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 item.setCheckState(Qt.Unchecked)
             self.fileListWidget.addItem(item)
+
+        # Enable export when files are loaded
+        self.actions.exportFileList.setEnabled(self.fileListWidget.count() > 0)
 
     def _update_status_stats(self, mouse_pos: QtCore.QPointF) -> None:
         stats: list[str] = []
