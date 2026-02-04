@@ -101,6 +101,9 @@ class MainWindow(QtWidgets.QMainWindow):
     _config_file: Path | None
     _config: dict
 
+    # Light blue background for annotated files
+    FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, 30)  # rgba with low alpha
+
     filename: str | None
     _text_osam_session: OsamSession | None = None
     _is_changed: bool = False
@@ -1634,7 +1637,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if len(items) > 0:
                 if len(items) != 1:
                     raise RuntimeError("There are duplicate files.")
-                items[0].setCheckState(Qt.Checked)
+                self._setFileItemAnnotated(items[0], True)
             # disable allows next and previous image to proceed
             # self.filename = filename
             return True
@@ -2200,6 +2203,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return label_file
 
+    def _setFileItemAnnotated(
+        self, item: QtWidgets.QListWidgetItem, annotated: bool
+    ) -> None:
+        """Set file list item check state and background color."""
+        if annotated:
+            item.setCheckState(Qt.Checked)
+            item.setBackground(self.FILE_ANNOTATED_COLOR)
+        else:
+            item.setCheckState(Qt.Unchecked)
+            item.setBackground(QtGui.QBrush())  # Clear background
+
     def deleteFile(self):
         mb = QtWidgets.QMessageBox
         msg = self.tr(
@@ -2216,7 +2230,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             item = self.fileListWidget.currentItem()
             if item:
-                item.setCheckState(Qt.Unchecked)
+                self._setFileItemAnnotated(item, False)
 
             self.resetState()
 
@@ -2490,10 +2504,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 label_file = osp.join(self.output_dir, label_file_without_path)
             item = QtWidgets.QListWidgetItem(file)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file):
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
+            is_annotated = (
+                QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
+            )
+            self._setFileItemAnnotated(item, is_annotated)
             self.fileListWidget.addItem(item)
 
         if len(self.imageList) > 1:
@@ -2528,10 +2542,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 label_file = osp.join(self.output_dir, label_file_without_path)
             item = QtWidgets.QListWidgetItem(filename)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file):
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
+            is_annotated = (
+                QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
+            )
+            self._setFileItemAnnotated(item, is_annotated)
             self.fileListWidget.addItem(item)
 
         # Enable export when files are loaded
