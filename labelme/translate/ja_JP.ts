@@ -582,8 +582,17 @@ Polygons</source>
     </message>
     <message>
         <location filename="../app.py" line="0"/>
-        <source>Opacity</source>
-        <translation>透明度</translation>
+        <source>Line
+Opacity</source>
+        <translation>線の
+透明度</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Fill
+Opacity</source>
+        <translation>塗りの
+透明度</translation>
     </message>
     <message>
         <location filename="../app.py" line="0"/>

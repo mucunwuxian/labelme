@@ -224,12 +224,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.zoomWidget = ZoomWidget()
 
-        # Opacity spinbox for polygon fill
-        self.opacityWidget = QtWidgets.QSpinBox()
-        self.opacityWidget.setRange(0, 100)
-        self.opacityWidget.setSuffix(" %")
-        self.opacityWidget.valueChanged.connect(self._opacity_changed)
-        self.opacityWidget.setValue(60)  # Default 60% transparency (alpha 102/255)
+        # Line opacity spinbox
+        self.lineOpacityWidget = QtWidgets.QSpinBox()
+        self.lineOpacityWidget.setRange(0, 95)  # Max 95% to keep lines visible
+        self.lineOpacityWidget.setSuffix(" %")
+        self.lineOpacityWidget.setSingleStep(5)  # 5% increments
+        self.lineOpacityWidget.valueChanged.connect(self._line_opacity_changed)
+        self.lineOpacityWidget.setValue(60)  # Default 60% transparency
+
+        # Fill opacity spinbox
+        self.fillOpacityWidget = QtWidgets.QSpinBox()
+        self.fillOpacityWidget.setRange(0, 100)
+        self.fillOpacityWidget.setSuffix(" %")
+        self.fillOpacityWidget.setSingleStep(5)  # 5% increments
+        self.fillOpacityWidget.valueChanged.connect(self._fill_opacity_changed)
+        self.fillOpacityWidget.setValue(80)  # Default 80% transparency
 
         # Line width spinbox
         self.lineWidthWidget = QtWidgets.QSpinBox()
@@ -582,15 +591,25 @@ class MainWindow(QtWidgets.QMainWindow):
         zoom.setDefaultWidget(QtWidgets.QWidget())
         zoom.defaultWidget().setLayout(zoomBoxLayout)
 
-        # Opacity widget for polygon fill transparency
-        opacity = QtWidgets.QWidgetAction(self)
-        opacityBoxLayout = QtWidgets.QVBoxLayout()
-        opacityLabel = QtWidgets.QLabel(self.tr("Opacity"))
-        opacityLabel.setAlignment(Qt.AlignCenter)
-        opacityBoxLayout.addWidget(opacityLabel)
-        opacityBoxLayout.addWidget(self.opacityWidget)
-        opacity.setDefaultWidget(QtWidgets.QWidget())
-        opacity.defaultWidget().setLayout(opacityBoxLayout)
+        # Line opacity widget
+        lineOpacity = QtWidgets.QWidgetAction(self)
+        lineOpacityBoxLayout = QtWidgets.QVBoxLayout()
+        lineOpacityLabel = QtWidgets.QLabel(self.tr("Line\nOpacity"))
+        lineOpacityLabel.setAlignment(Qt.AlignCenter)
+        lineOpacityBoxLayout.addWidget(lineOpacityLabel)
+        lineOpacityBoxLayout.addWidget(self.lineOpacityWidget)
+        lineOpacity.setDefaultWidget(QtWidgets.QWidget())
+        lineOpacity.defaultWidget().setLayout(lineOpacityBoxLayout)
+
+        # Fill opacity widget
+        fillOpacity = QtWidgets.QWidgetAction(self)
+        fillOpacityBoxLayout = QtWidgets.QVBoxLayout()
+        fillOpacityLabel = QtWidgets.QLabel(self.tr("Fill\nOpacity"))
+        fillOpacityLabel.setAlignment(Qt.AlignCenter)
+        fillOpacityBoxLayout.addWidget(fillOpacityLabel)
+        fillOpacityBoxLayout.addWidget(self.fillOpacityWidget)
+        fillOpacity.setDefaultWidget(QtWidgets.QWidget())
+        fillOpacity.defaultWidget().setLayout(fillOpacityBoxLayout)
 
         # Line width widget
         lineWidth = QtWidgets.QWidgetAction(self)
@@ -955,7 +974,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     None,
                     fitWindow,
                     zoom,
-                    opacity,
+                    lineOpacity,
+                    fillOpacity,
                     lineWidth,
                     None,
                     selectAiModel,
@@ -1025,9 +1045,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.restoreState(state)
 
         # Restore opacity and line width settings
-        opacity = self.settings.value("canvas/opacity", 60, type=int)
+        lineOpacity = self.settings.value("canvas/lineOpacity", 60, type=int)
+        fillOpacity = self.settings.value("canvas/fillOpacity", 80, type=int)
         lineWidth = self.settings.value("canvas/lineWidth", 5, type=int)
-        self.opacityWidget.setValue(opacity)
+        self.lineOpacityWidget.setValue(lineOpacity)
+        self.fillOpacityWidget.setValue(fillOpacity)
         self.lineWidthWidget.setValue(lineWidth)
 
         if filename:
@@ -1488,15 +1510,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_shape_color(self, shape):
         r, g, b = self._get_rgb_by_label(shape.label)
-        # Apply current opacity setting to line color
-        opacity = self.opacityWidget.value()
-        alpha = int((100 - opacity) * 255 / 100)
-        shape.line_color = QtGui.QColor(r, g, b, alpha)
+        # Apply current opacity settings
+        lineOpacity = self.lineOpacityWidget.value()
+        lineAlpha = int((100 - lineOpacity) * 255 / 100)
+        fillOpacity = self.fillOpacityWidget.value()
+        fillAlpha = int((100 - fillOpacity) * 255 / 100)
+        shape.line_color = QtGui.QColor(r, g, b, lineAlpha)
         shape.vertex_fill_color = QtGui.QColor(r, g, b)
         shape.hvertex_fill_color = QtGui.QColor(255, 255, 255)
-        shape.fill_color = QtGui.QColor(r, g, b, 128)
+        shape.fill_color = QtGui.QColor(r, g, b, fillAlpha)
         shape.select_line_color = QtGui.QColor(255, 255, 255)
-        shape.select_fill_color = QtGui.QColor(r, g, b, 155)
+        shape.select_fill_color = QtGui.QColor(r, g, b, min(fillAlpha + 50, 255))
 
     def _get_rgb_by_label(self, label: str) -> tuple[int, int, int]:
         if self._config["shape_color"] == "auto":
@@ -1776,7 +1800,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _zoom_requested(self, delta: int, pos: QtCore.QPointF) -> None:
         self._add_zoom(increment=1.1 if delta > 0 else 0.9, pos=pos)
 
-    def _opacity_changed(self, value: int) -> None:
+    def _line_opacity_changed(self, value: int) -> None:
         """Update line opacity for all shapes."""
         # value is transparency (100 = fully transparent, 0 = fully opaque)
         alpha = int((100 - value) * 255 / 100)
@@ -1787,6 +1811,22 @@ class MainWindow(QtWidgets.QMainWindow):
             for shape in self.canvas.shapes:
                 if "line_color" in shape.__dict__:
                     shape.line_color.setAlpha(alpha)
+            self.canvas.update()
+
+    def _fill_opacity_changed(self, value: int) -> None:
+        """Update fill opacity for all shapes."""
+        # value is transparency (100 = fully transparent, 0 = fully opaque)
+        alpha = int((100 - value) * 255 / 100)
+        # Update class-level default fill color
+        Shape.fill_color.setAlpha(alpha)
+        Shape.select_fill_color.setAlpha(min(alpha + 50, 255))
+        # Update existing shapes (only if canvas exists and they have instance-level fill_color)
+        if hasattr(self, "canvas") and self.canvas is not None:
+            for shape in self.canvas.shapes:
+                if "fill_color" in shape.__dict__:
+                    shape.fill_color.setAlpha(alpha)
+                if "select_fill_color" in shape.__dict__:
+                    shape.select_fill_color.setAlpha(min(alpha + 50, 255))
             self.canvas.update()
 
     def _line_width_changed(self, value: int) -> None:
@@ -1965,7 +2005,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         self.brightnessContrast(value=False, is_initial_load=True)
         # Apply current opacity and line width settings to loaded shapes
-        self._opacity_changed(self.opacityWidget.value())
+        self._line_opacity_changed(self.lineOpacityWidget.value())
+        self._fill_opacity_changed(self.fillOpacityWidget.value())
         self._line_width_changed(self.lineWidthWidget.value())
         self._paint_canvas()
         self.addRecentFile(self.filename)
@@ -2024,7 +2065,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("window/position", self.pos())
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("recentFiles", self.recentFiles)
-        self.settings.setValue("canvas/opacity", self.opacityWidget.value())
+        self.settings.setValue("canvas/lineOpacity", self.lineOpacityWidget.value())
+        self.settings.setValue("canvas/fillOpacity", self.fillOpacityWidget.value())
         self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())

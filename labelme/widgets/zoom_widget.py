@@ -6,9 +6,9 @@ from PyQt5 import QtWidgets
 class ZoomWidget(QtWidgets.QSpinBox):
     def __init__(self, value=100):
         super().__init__()
-        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.setRange(1, 1000)
         self.setSuffix(" %")
+        self.setSingleStep(5)  # 5% increments
         self.setValue(value)
         self.setToolTip("Zoom Level")
         self.setStatusTip(self.toolTip())

@@ -72,6 +72,7 @@ class Canvas(QtWidgets.QWidget):
     _createMode = "polygon"
 
     _fill_drawing = False
+    _near_start_point = False  # True when creating polygon and near starting point
 
     prevPoint: QPointF
     prevMovePoint: QPointF
@@ -382,6 +383,9 @@ class Canvas(QtWidgets.QWidget):
                 pos = self.current[0]
                 self.overrideCursor(CURSOR_POINT)
                 self.current.highlightVertex(0, Shape.NEAR_VERTEX)
+                self._near_start_point = True
+            else:
+                self._near_start_point = False
             if self.createMode in ["polygon", "linestrip"]:
                 self.line.points = [self.current[-1], pos]
                 self.line.point_labels = [1, 1]
@@ -599,6 +603,7 @@ class Canvas(QtWidgets.QWidget):
                         if self.createMode in ["ai_polygon", "ai_mask"]
                         else self.createMode
                     )
+                    self.current._is_creating = True  # Mark as being created
                     self.current.addPoint(pos, label=0 if is_shift_pressed else 1)
                     if self.createMode == "point":
                         self.finalise()
@@ -967,15 +972,19 @@ class Canvas(QtWidgets.QWidget):
 
         drawing_shape: Shape = self.current.copy()
         if self.createMode == "polygon":
-            if self.fillDrawing() and len(self.current.points) >= 2:
-                assert drawing_shape.fill_color is not None
-                if drawing_shape.fill_color.getRgb()[3] == 0:
-                    logger.warning(
-                        "fill_drawing=true, but fill_color is transparent,"
-                        " so forcing to be opaque."
-                    )
-                    drawing_shape.fill_color.setAlpha(64)
+            # Add preview point when near start
+            if self._near_start_point and len(self.current.points) >= 2:
                 drawing_shape.addPoint(self.line[1])
+            # Only show fill when near start point (preview)
+            drawing_shape.fill = self._near_start_point
+            drawing_shape.selected = False  # Use fill_color, not select_fill_color
+            drawing_shape._is_creating = True  # Flag for drawing start vertex in white
+            # Apply current fill opacity from Shape class
+            if self._near_start_point:
+                # Use line color with current fill opacity for preview
+                r, g, b, _ = drawing_shape.line_color.getRgb()
+                fill_alpha = Shape.fill_color.alpha()
+                drawing_shape.fill_color = QtGui.QColor(r, g, b, fill_alpha)
         elif self.createMode in ["ai_polygon", "ai_mask"]:
             drawing_shape.addPoint(
                 point=self.line.points[1],
@@ -986,8 +995,11 @@ class Canvas(QtWidgets.QWidget):
                 point_labels=drawing_shape.point_labels,
                 shape=drawing_shape,
             )
-        drawing_shape.fill = self.fillDrawing()
-        drawing_shape.selected = self.fillDrawing()
+            drawing_shape.fill = self.fillDrawing()
+            drawing_shape.selected = self.fillDrawing()
+        else:
+            drawing_shape.fill = self.fillDrawing()
+            drawing_shape.selected = self.fillDrawing()
         drawing_shape.paint(p)
         p.end()
 
@@ -1020,6 +1032,7 @@ class Canvas(QtWidgets.QWidget):
                 shape=self.current,
             )
         self.current.close()
+        self.current._is_creating = False  # No longer creating
 
         self.shapes.append(self.current)
         self.storeShapes()

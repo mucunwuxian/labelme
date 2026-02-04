@@ -85,6 +85,7 @@ class Shape:
             self.MOVE_VERTEX: (1.5, self.P_SQUARE),
         }
         self._highlightEdgeMidpoint = None  # For rectangle edge midpoint highlighting
+        self._is_creating = False  # True when shape is being created (for start vertex highlight)
 
         self._closed = False
 
@@ -290,13 +291,22 @@ class Shape:
                 # may be desirable.
                 # self.drawVertex(vrtx_path, 0)
 
+                start_vrtx_path = QtGui.QPainterPath()
                 for i, p in enumerate(self.points):
                     line_path.lineTo(self._scale_point(p))
-                    self.drawVertex(vrtx_path, i)
+                    # Draw start vertex separately when creating (for white color)
+                    if self._is_creating and i == 0:
+                        self.drawVertex(start_vrtx_path, i)
+                    else:
+                        self.drawVertex(vrtx_path, i)
                 if self.isClosed():
                     line_path.lineTo(self._scale_point(self.points[0]))
 
             painter.drawPath(line_path)
+            # Draw start vertex in white when creating
+            if self._is_creating and start_vrtx_path.length() > 0:
+                painter.drawPath(start_vrtx_path)
+                painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
             if vrtx_path.length() > 0:
                 painter.drawPath(vrtx_path)
                 painter.fillPath(vrtx_path, self._current_vertex_fill_color)
@@ -327,6 +337,9 @@ class Shape:
         # For point shapes, always use vertex_fill_color to maintain visibility
         if self.shape_type == "point":
             self._current_vertex_fill_color = self.vertex_fill_color
+        elif self._is_creating and i == 0:
+            # Draw starting vertex in white during polygon creation
+            self._current_vertex_fill_color = QtGui.QColor(255, 255, 255)
         elif self._highlightIndex is not None:
             self._current_vertex_fill_color = self.hvertex_fill_color
         else:
