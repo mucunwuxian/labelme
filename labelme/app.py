@@ -14,8 +14,9 @@ import webbrowser
 from pathlib import Path
 from typing import Literal
 
+import locale
+
 import imgviz
-import natsort
 import numpy as np
 import osam
 from loguru import logger
@@ -2415,4 +2416,20 @@ def _scan_image_files(root_dir: str) -> list[str]:
                 images.append(relativePath)
 
     logger.debug("found {:d} images in {!r}", len(images), root_dir)
-    return natsort.os_sorted(images)
+
+    # Natural sort using standard library only (avoids natsort crash on some environments)
+    try:
+        locale.setlocale(locale.LC_COLLATE, "")
+    except locale.Error:
+        pass  # Use default locale if setting fails
+
+    _num_re = re.compile(r"(\d+)")
+
+    def natsort_like_key(p: str):
+        name = Path(p).name
+        parts = _num_re.split(name)
+        return tuple(
+            int(x) if x.isdigit() else locale.strxfrm(x.lower()) for x in parts
+        )
+
+    return sorted(images, key=natsort_like_key)
