@@ -376,6 +376,16 @@ class MainWindow(QtWidgets.QMainWindow):
             disabled_opacity=0.6,
         )
 
+        progressStats = action(
+            self.tr("Progress\n&Stats"),
+            self.progressStats,
+            None,
+            icon="chart-bar.svg",
+            tip=self.tr("Generate progress statistics chart"),
+            enabled=False,
+            disabled_opacity=0.6,
+        )
+
         changeOutputDir = action(
             self.tr("&Change Output Dir"),
             slot=self.changeOutputDirDialog,
@@ -762,6 +772,7 @@ class MainWindow(QtWidgets.QMainWindow):
             close=close,
             deleteFile=deleteFile,
             exportFileList=exportFileList,
+            progressStats=progressStats,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             toggle_keep_prev_brightness_contrast=action(
                 text=self.tr("Keep Previous Brightness/Contrast"),
@@ -965,6 +976,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     save,
                     deleteFile,
                     exportFileList,
+                    progressStats,
                     None,
                     editMode,
                     duplicate,
@@ -2406,6 +2418,229 @@ class MainWindow(QtWidgets.QMainWindow):
             labels,
         ]
 
+    def progressStats(self):
+        """Generate progress statistics chart as a 2x3 subplot image."""
+        if not self.imageList:
+            return
+
+        import matplotlib.pyplot as plt
+        from collections import Counter
+
+        # Ask for save location
+        default_name = "progress_stats.png"
+        if self._prev_opened_dir:
+            default_path = osp.join(self._prev_opened_dir, default_name)
+        else:
+            default_path = default_name
+
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            self.tr("Save Progress Stats"),
+            default_path,
+            self.tr("PNG files (*.png);;All files (*)"),
+        )
+        if not filename:
+            return
+
+        # --- Collect data from all JSON files ---
+        daily_counts: dict[str, int] = {}  # date_str -> count
+        label_counter: Counter = Counter()
+        shapes_per_file: list[int] = []
+        vertices_per_file: list[int] = []
+        area_per_file: list[float] = []
+
+        for image_path in self.imageList:
+            label_file = f"{osp.splitext(image_path)[0]}.json"
+            if self.output_dir:
+                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            if not osp.exists(label_file):
+                continue
+
+            try:
+                mtime = osp.getmtime(label_file)
+                date_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                daily_counts[date_str] = daily_counts.get(date_str, 0) + 1
+
+                with open(label_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                shapes = data.get("shapes", [])
+                shapes_per_file.append(len(shapes))
+
+                # Get image dimensions for area ratio
+                img_w = data.get("imageWidth", 0)
+                img_h = data.get("imageHeight", 0)
+                image_area = img_w * img_h if img_w and img_h else 0
+
+                file_vertices = 0
+                file_bbox_area = 0.0
+                for shape in shapes:
+                    label_counter[shape.get("label", "")] += 1
+                    points = shape.get("points", [])
+                    file_vertices += len(points)
+                    # Bounding box area
+                    if len(points) >= 2:
+                        xs = [p[0] for p in points]
+                        ys = [p[1] for p in points]
+                        file_bbox_area += (max(xs) - min(xs)) * (max(ys) - min(ys))
+                vertices_per_file.append(file_vertices)
+                # Convert to percentage of image area
+                if image_area > 0:
+                    area_per_file.append(file_bbox_area / image_area * 100)
+                else:
+                    area_per_file.append(0.0)
+            except Exception:
+                continue
+
+        if not daily_counts:
+            self.errorMessage(
+                self.tr("No Data"),
+                self.tr("No annotation files found to analyze."),
+            )
+            return
+
+        # --- Sort dates and build time series ---
+        sorted_dates = sorted(daily_counts.keys())
+        # Fill missing dates with 0
+        all_dates: list[str] = []
+        all_counts: list[int] = []
+        start = datetime.datetime.strptime(sorted_dates[0], "%Y-%m-%d")
+        end = datetime.datetime.strptime(sorted_dates[-1], "%Y-%m-%d")
+        current = start
+        while current <= end:
+            ds = current.strftime("%Y-%m-%d")
+            all_dates.append(ds)
+            all_counts.append(daily_counts.get(ds, 0))
+            current += datetime.timedelta(days=1)
+
+        cumsum = np.cumsum(all_counts)
+
+        # Moving average (7-day)
+        window = min(7, len(all_counts))
+        if window > 0:
+            kernel = np.ones(window) / window
+            moving_avg = np.convolve(all_counts, kernel, mode="same")
+        else:
+            moving_avg = np.array(all_counts, dtype=float)
+
+        # --- Create figure ---
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle("Annotation Progress Stats", fontsize=16, fontweight="bold")
+
+        # Date tick helpers
+        date_indices = np.arange(len(all_dates))
+        n_ticks = min(10, len(all_dates))
+        tick_step = max(1, len(all_dates) // n_ticks)
+        tick_positions = date_indices[::tick_step]
+        tick_labels = [all_dates[i] for i in tick_positions]
+
+        # (1,1) Daily annotation count bar chart
+        ax = axes[0, 0]
+        bars = ax.bar(date_indices, all_counts, color="steelblue", alpha=0.8)
+        ax.set_title("Daily Annotations")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Count")
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=7)
+        # Add count labels on bars
+        if all_counts:
+            max_count = max(all_counts)
+            threshold = max_count * 0.7
+            for bar, count in zip(bars, all_counts):
+                if count == 0:
+                    continue
+                if count > threshold:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() - max_count * 0.02,
+                            str(count), ha="center", va="top", fontsize=9, color="black")
+                else:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max_count * 0.01,
+                            str(count), ha="center", va="bottom", fontsize=9, color="black")
+
+        # (1,2) Cumulative + moving average
+        ax = axes[0, 1]
+        ax.fill_between(date_indices, cumsum, alpha=0.3, color="steelblue")
+        ax.plot(date_indices, cumsum, color="steelblue", linewidth=2, label="Cumulative")
+        ax.plot(
+            date_indices, moving_avg, color="orangered",
+            linewidth=2, linestyle="--", label=f"{window}-day MA",
+        )
+        ax.set_title("Cumulative & Moving Average")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Count")
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=7)
+        ax.legend(fontsize=8)
+
+        # (1,3) Label distribution (horizontal bar)
+        ax = axes[0, 2]
+        if label_counter:
+            top_labels = label_counter.most_common(15)
+            labels_list = [item[0] for item in reversed(top_labels)]
+            counts_list = [item[1] for item in reversed(top_labels)]
+            y_pos = np.arange(len(labels_list))
+            ax.barh(y_pos, counts_list, color="steelblue", alpha=0.8)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(labels_list, fontsize=8)
+            ax.set_xlabel("Count")
+        title = "Label Distribution"
+        if len(label_counter) > 15:
+            title += " (Top 15)"
+        ax.set_title(title)
+
+        # (2,1) Shapes per file histogram
+        ax = axes[1, 0]
+        if shapes_per_file:
+            ax.hist(shapes_per_file, bins=min(30, max(5, len(set(shapes_per_file)))),
+                    color="steelblue", alpha=0.8, edgecolor="white")
+            mean_v = np.mean(shapes_per_file)
+            ax.axvline(mean_v, color="orangered", linestyle="--",
+                       label=f"Mean: {mean_v:.1f}")
+            ax.legend(fontsize=8)
+        ax.set_title("Shapes per File")
+        ax.set_xlabel("Number of Shapes")
+        ax.set_ylabel("Files")
+
+        # (2,2) Vertices per file histogram
+        ax = axes[1, 1]
+        if vertices_per_file:
+            ax.hist(vertices_per_file, bins=min(30, max(5, len(set(vertices_per_file)))),
+                    color="steelblue", alpha=0.8, edgecolor="white")
+            mean_v = np.mean(vertices_per_file)
+            ax.axvline(mean_v, color="orangered", linestyle="--",
+                       label=f"Mean: {mean_v:.1f}")
+            ax.legend(fontsize=8)
+        ax.set_title("Vertices per File")
+        ax.set_xlabel("Number of Vertices")
+        ax.set_ylabel("Files")
+
+        # (2,3) Area ratio per file histogram
+        ax = axes[1, 2]
+        if area_per_file:
+            ax.hist(area_per_file, bins=min(30, max(5, len(set(area_per_file)))),
+                    color="steelblue", alpha=0.8, edgecolor="white")
+            mean_v = np.mean(area_per_file)
+            ax.axvline(mean_v, color="orangered", linestyle="--",
+                       label=f"Mean: {mean_v:.1f}%")
+            ax.legend(fontsize=8)
+        ax.set_title("BBox Area Ratio per File")
+        ax.set_xlabel("Area (%)")
+        ax.set_ylabel("Files")
+
+        plt.tight_layout()
+
+        try:
+            fig.savefig(filename, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"Progress stats saved to: {filename}")
+            self.show_status_message(
+                self.tr("Progress stats saved to %s") % filename
+            )
+        except Exception as e:
+            plt.close(fig)
+            self.errorMessage(
+                self.tr("Export Error"),
+                self.tr("Failed to save progress stats: %s") % str(e),
+            )
+
     def _open_config_file(self) -> None:
         if self._config_file is None:
             QtWidgets.QMessageBox.information(
@@ -2606,6 +2841,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Enable export when files are loaded
         self.actions.exportFileList.setEnabled(self.fileListWidget.count() > 0)
+        self.actions.progressStats.setEnabled(self.fileListWidget.count() > 0)
 
     def _update_status_stats(self, mouse_pos: QtCore.QPointF) -> None:
         stats: list[str] = []

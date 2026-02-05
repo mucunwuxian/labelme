@@ -309,6 +309,48 @@
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Progress
+&amp;Stats</source>
+        <translation>進捗
+集計(&amp;S)</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Generate progress statistics chart</source>
+        <translation>進捗集計チャートを生成</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Save Progress Stats</source>
+        <translation>進捗集計の保存</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>PNG files (*.png);;All files (*)</source>
+        <translation>PNGファイル (*.png);;すべてのファイル (*)</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>No Data</source>
+        <translation>データなし</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>No annotation files found to analyze.</source>
+        <translation>分析するアノテーションファイルが見つかりません。</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Progress stats saved to %s</source>
+        <translation>進捗集計を %s に保存しました</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Failed to save progress stats: %s</source>
+        <translation>進捗集計の保存に失敗しました: %s</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>&amp;Change Output Dir</source>
         <translation>出力先を変更(&amp;C)</translation>
     </message>
