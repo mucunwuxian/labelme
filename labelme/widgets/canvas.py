@@ -143,6 +143,15 @@ class Canvas(QtWidgets.QWidget):
         self.grabGesture(Qt.PinchGesture)
         self.setAttribute(Qt.WA_AcceptTouchEvents)
 
+        # Hover label delay
+        self._hover_label_shape = None
+        self._hover_label_ready = False
+        self._hover_label_timer = QtCore.QTimer(self)
+        self._hover_label_timer.setSingleShot(True)
+        self._hover_label_timer.setInterval(500)
+        self._hover_label_timer.timeout.connect(self._onHoverLabelTimeout)
+        self._mouse_pressed = False
+
     def fillDrawing(self):
         return self._fill_drawing
 
@@ -531,6 +540,14 @@ class Canvas(QtWidgets.QWidget):
         else:  # Nothing found, clear highlights, reset state.
             self.restoreCursor()
             self.unHighlight()
+        # Update hover label state
+        if self.hShape != self._hover_label_shape:
+            self._hover_label_shape = self.hShape
+            self._hover_label_ready = False
+            self._hover_label_timer.stop()
+            if self.hShape is not None:
+                self._hover_label_timer.start()
+
         self.vertexSelected.emit(self.hVertex is not None)
         self._update_status(extra_messages=status_messages)
 
@@ -559,6 +576,8 @@ class Canvas(QtWidgets.QWidget):
         self.movingShape = True  # Save changes
 
     def mousePressEvent(self, a0: QtGui.QMouseEvent) -> None:
+        self._mouse_pressed = True
+
         pos: QPointF = self.transformPos(a0.localPos())
 
         is_shift_pressed = a0.modifiers() & Qt.ShiftModifier
@@ -659,6 +678,8 @@ class Canvas(QtWidgets.QWidget):
         self._update_status()
 
     def mouseReleaseEvent(self, a0: QtGui.QMouseEvent) -> None:
+        self._mouse_pressed = False
+
         if a0.button() == Qt.RightButton:
             menu = self.menus[len(self.selectedShapesCopy) > 0]
             self.restoreCursor()
@@ -962,6 +983,17 @@ class Canvas(QtWidgets.QWidget):
             for s in self.selectedShapesCopy:
                 s.paint(p)
 
+        # Draw hover label next to cursor
+        # Hidden during: mouse button pressed (including vertex/edge dragging)
+        if (
+            self._hover_label_ready
+            and self.hShape is not None
+            and self.hShape.label
+            and self.prevMovePoint is not None
+            and not self._mouse_pressed
+        ):
+            self._drawHoverLabel(p, self.hShape)
+
         if not self.current or self.createMode not in [
             "polygon",
             "ai_polygon",
@@ -1002,6 +1034,49 @@ class Canvas(QtWidgets.QWidget):
             drawing_shape.selected = self.fillDrawing()
         drawing_shape.paint(p)
         p.end()
+
+    def _onHoverLabelTimeout(self):
+        """Called after hover delay; mark label as ready and repaint."""
+        self._hover_label_ready = True
+        self.update()
+
+    def _drawHoverLabel(self, painter, shape):
+        """Draw the shape's label next to the cursor."""
+        painter.save()
+
+        # Cursor position in scaled coordinates
+        cx = self.prevMovePoint.x() * self.scale
+        cy = self.prevMovePoint.y() * self.scale
+        offset_x = 20
+        offset_y = -20
+
+        font = painter.font()
+        font.setPointSize(max(8, int(10 * self.scale)))
+        painter.setFont(font)
+
+        fm = QtGui.QFontMetrics(font)
+        text_rect = fm.boundingRect(shape.label)
+        padding = 4
+
+        bg_rect = QtCore.QRectF(
+            cx + offset_x,
+            cy + offset_y - text_rect.height(),
+            text_rect.width() + padding * 2,
+            text_rect.height() + padding * 2,
+        )
+
+        r, g, b, _ = shape.line_color.getRgb()
+        fill_alpha = Shape.fill_color.alpha()
+        # 0.75x transparency = more opaque, capped at 255
+        label_alpha = min(int(255 - (255 - fill_alpha) * 0.75), 255)
+        painter.setBrush(QtGui.QColor(r, g, b, label_alpha))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawRoundedRect(bg_rect, 3, 3)
+
+        painter.setPen(QtGui.QColor(255, 255, 255))
+        painter.drawText(bg_rect, QtCore.Qt.AlignCenter, shape.label)
+
+        painter.restore()
 
     def transformPos(self, point: QPointF) -> QPointF:
         """Convert from widget-logical coordinates to painter-logical ones."""

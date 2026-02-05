@@ -1124,7 +1124,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _get_window_title(self, dirty: bool) -> str:
         window_title: str = __appname__
         if self.imagePath:
-            window_title = f"{window_title} - {self.imagePath}"
+            if self._prev_opened_dir:
+                # Directory mode: {dir_name}/{filename}
+                dir_name = osp.basename(self._prev_opened_dir)
+                file_name = osp.basename(self.imagePath)
+                display_path = f"{dir_name}/{file_name}"
+            else:
+                # File mode: {filename}
+                display_path = osp.basename(self.imagePath)
+            window_title = f"{window_title} - {display_path}"
             if self.fileListWidget.count() and self.fileListWidget.currentItem():
                 window_title = (
                     f"{window_title} "
@@ -1582,7 +1590,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 description=shape_dict["description"],
                 mask=shape_dict["mask"],
             )
-            for x, y in shape_dict["points"]:
+            points = shape_dict["points"]
+            # Normalize rectangles with 4 points to 2 diagonal corner points
+            if shape_dict["shape_type"] == "rectangle" and len(points) == 4:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                points = [[min(xs), min(ys)], [max(xs), max(ys)]]
+            for x, y in points:
                 shape.addPoint(QtCore.QPointF(x, y))
             shape.close()
 

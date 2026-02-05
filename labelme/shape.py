@@ -232,7 +232,6 @@ class Shape:
             negative_vrtx_path = QtGui.QPainterPath()
 
             if self.shape_type in ["rectangle", "mask"]:
-                assert len(self.points) in [1, 2]
                 if len(self.points) == 2:
                     rectangle = QtCore.QRectF(
                         self._scale_point(self.points[0]),
@@ -323,6 +322,7 @@ class Shape:
             painter.setPen(pen)
             painter.drawPath(negative_vrtx_path)
             painter.fillPath(negative_vrtx_path, QtGui.QColor(255, 0, 0, 255))
+
 
     def drawVertex(self, path, i):
         d = self.point_size
