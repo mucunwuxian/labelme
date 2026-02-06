@@ -523,11 +523,15 @@ class Canvas(QtWidgets.QWidget):
             elif shape.containsPoint(pos):
                 if self.selectedVertex() and self.hShape:
                     self.hShape.highlightClear()
+                if self.hEdgeMidpoint is not None and self.hShape:
+                    self.hShape.highlightClear()
                 self.prevhVertex = self.hVertex
                 self.hVertex = None
                 self.prevhShape = self.hShape = shape
                 self.prevhEdge = self.hEdge
                 self.hEdge = None
+                self.prevhEdgeMidpoint = self.hEdgeMidpoint
+                self.hEdgeMidpoint = None
                 status_messages.extend(
                     [
                         self.tr("Click & drag to move shape"),
