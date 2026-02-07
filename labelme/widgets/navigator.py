@@ -16,10 +16,12 @@ class NavigatorWidget(QtWidgets.QWidget):
         self._viewport_rect: QtCore.QRectF | None = None  # In ratio (0-1)
         self._shapes: list = []  # List of shapes to draw
         self._img_size: tuple[int, int] = (0, 0)  # Original image size
-        self._max_size = 300
-        self.setMinimumSize(100, 100)
-        self.setMaximumSize(self._max_size, self._max_size)
-        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self._img_offset: tuple[int, int] = (0, 0)  # Offset for centered image
+        self.setMinimumSize(100, 50)  # Allow small size
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding
+        )
 
     def setPixmap(self, pixmap: QtGui.QPixmap | None):
         """Set the source image pixmap."""
@@ -41,28 +43,41 @@ class NavigatorWidget(QtWidgets.QWidget):
         self._viewport_rect = QtCore.QRectF(x_ratio, y_ratio, w_ratio, h_ratio)
         self.update()
 
+    def resizeEvent(self, event):
+        """Handle resize events."""
+        super().resizeEvent(event)
+        self._updateScaledPixmap()
+
     def _updateScaledPixmap(self):
-        """Update the scaled pixmap to fit widget size."""
+        """Update the scaled pixmap to fit widget size with centered padding."""
         if self._pixmap is None or self._pixmap.isNull():
             self._scaled_pixmap = None
+            self._img_offset = (0, 0)
             return
 
-        # Scale to fit within max size while maintaining aspect ratio
+        # Get available space
+        available_w = self.width()
+        available_h = self.height()
+
+        # Scale to fit within available space while maintaining aspect ratio
         self._scaled_pixmap = self._pixmap.scaled(
-            self._max_size,
-            self._max_size,
+            available_w,
+            available_h,
             QtCore.Qt.KeepAspectRatio,
             QtCore.Qt.SmoothTransformation,
         )
-        # Resize widget to match scaled pixmap
-        self.setFixedSize(self._scaled_pixmap.size())
+
+        # Calculate offset for centering
+        offset_x = (available_w - self._scaled_pixmap.width()) // 2
+        offset_y = (available_h - self._scaled_pixmap.height()) // 2
+        self._img_offset = (offset_x, offset_y)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        # Fill background
-        painter.fillRect(self.rect(), QtGui.QColor(40, 40, 40))
+        # Fill background with gray
+        painter.fillRect(self.rect(), QtGui.QColor(180, 180, 180))
 
         if self._scaled_pixmap is None or self._scaled_pixmap.isNull():
             # Draw placeholder text
@@ -70,8 +85,9 @@ class NavigatorWidget(QtWidgets.QWidget):
             painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "No Image")
             return
 
-        # Draw scaled image
-        painter.drawPixmap(0, 0, self._scaled_pixmap)
+        # Draw scaled image at centered position
+        offset_x, offset_y = self._img_offset
+        painter.drawPixmap(offset_x, offset_y, self._scaled_pixmap)
 
         # Draw shapes
         if self._shapes and self._img_size[0] > 0 and self._img_size[1] > 0:
@@ -90,7 +106,10 @@ class NavigatorWidget(QtWidgets.QWidget):
                 fill_color.setAlpha(60)
                 painter.setBrush(fill_color)
 
-                points = [QtCore.QPointF(p.x() * scale_x, p.y() * scale_y) for p in shape.points]
+                points = [
+                    QtCore.QPointF(p.x() * scale_x + offset_x, p.y() * scale_y + offset_y)
+                    for p in shape.points
+                ]
                 if shape.shape_type == "rectangle" and len(points) == 2:
                     rect = QtCore.QRectF(points[0], points[1])
                     painter.drawRect(rect)
@@ -111,8 +130,8 @@ class NavigatorWidget(QtWidgets.QWidget):
             w = self._scaled_pixmap.width()
             h = self._scaled_pixmap.height()
             rect = QtCore.QRectF(
-                self._viewport_rect.x() * w,
-                self._viewport_rect.y() * h,
+                self._viewport_rect.x() * w + offset_x,
+                self._viewport_rect.y() * h + offset_y,
                 self._viewport_rect.width() * w,
                 self._viewport_rect.height() * h,
             )
@@ -138,9 +157,10 @@ class NavigatorWidget(QtWidgets.QWidget):
         if self._scaled_pixmap is None or self._scaled_pixmap.isNull():
             return
 
-        # Convert click position to ratio
-        x_ratio = pos.x() / self._scaled_pixmap.width()
-        y_ratio = pos.y() / self._scaled_pixmap.height()
+        # Convert click position to ratio (accounting for offset)
+        offset_x, offset_y = self._img_offset
+        x_ratio = (pos.x() - offset_x) / self._scaled_pixmap.width()
+        y_ratio = (pos.y() - offset_y) / self._scaled_pixmap.height()
 
         # Clamp to valid range
         x_ratio = max(0.0, min(1.0, x_ratio))

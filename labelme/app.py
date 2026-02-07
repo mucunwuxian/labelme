@@ -178,11 +178,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prev_opened_dir = None
 
         # Navigator (minimap)
-        self.navigator = NavigatorWidget()
-        self.navigator_dock = QtWidgets.QDockWidget(self.tr("Navigator"), self)
-        self.navigator_dock.setObjectName("Navigator")
-        self.navigator_dock.setWidget(self.navigator)
-        self.navigator.viewportChangeRequested.connect(self._onNavigatorViewportChange)
+        self.navigator, self.navigator_dock = self._create_navigator_dock()
+        nav_features = (
+            QtWidgets.QDockWidget.DockWidgetClosable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+            | QtWidgets.QDockWidget.DockWidgetMovable
+        )
+        self.navigator_dock.setFeatures(nav_features)
 
         self.flag_dock = self.flag_widget = None
         self.flag_dock = QtWidgets.QDockWidget(self.tr("Flags"), self)
@@ -297,11 +299,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._config[dock]["show"] is False:
                 getattr(self, dock).setVisible(False)
 
+        self.setDockNestingEnabled(True)
+        self.setDockOptions(
+            self.dockOptions() | QtWidgets.QMainWindow.AllowNestedDocks
+        )
         self.addDockWidget(Qt.RightDockWidgetArea, self.navigator_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.flag_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.shape_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.flag_dock, Qt.Vertical)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock, Qt.Vertical)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.shape_dock, Qt.Vertical)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock, Qt.Vertical)
 
         # Actions
         action = functools.partial(utils.newAction, self)
@@ -1060,12 +1066,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recentFiles = self.settings.value("recentFiles", []) or []
         size = self.settings.value("window/size", QtCore.QSize(900, 500))
         position = self.settings.value("window/position", QtCore.QPoint(0, 0))
+        layout_version = self.settings.value("window/state_version", 0, type=int)
         state = self.settings.value("window/state", QtCore.QByteArray())
+        self._force_right_dock_layout = False
+        self._skip_restore_state = False
+        if layout_version < 3:
+            # Reset stale dock layout once to ensure splitters exist (notably on macOS).
+            state = QtCore.QByteArray()
+            self.settings.setValue("window/state_version", 3)
+            self.settings.setValue("window/state", QtCore.QByteArray())
+            self._force_right_dock_layout = True
+            self._skip_restore_state = True
         self.resize(size)
         self.move(position)
         # or simply:
         # self.restoreGeometry(settings['window/geometry'])
-        self.restoreState(state)
+        if not self._skip_restore_state:
+            self.restoreState(state)
+        # Ensure dock splitters exist even if a previous saved state overwrote them.
+        # On macOS, apply after the window is shown to avoid layout overrides.
+        self._did_force_right_dock_splits = False
+        QtCore.QTimer.singleShot(0, self._ensure_right_dock_splits)
 
         # Restore opacity and line width settings
         lineOpacity = self.settings.value("canvas/lineOpacity", 60, type=int)
@@ -1121,6 +1142,65 @@ class MainWindow(QtWidgets.QMainWindow):
                 config_file=config_file, config_overrides=config_overrides
             )
         return config_file, config
+
+    def _ensure_right_dock_splits(self) -> None:
+        dock_order = [
+            self.navigator_dock,
+            self.flag_dock,
+            self.label_dock,
+            self.shape_dock,
+            self.file_dock,
+        ]
+        if self._force_right_dock_layout:
+            for dock in dock_order:
+                self.removeDockWidget(dock)
+            if self.navigator_dock is not None:
+                self.navigator_dock.deleteLater()
+            if self.navigator is not None:
+                self.navigator.deleteLater()
+            self.navigator, self.navigator_dock = self._create_navigator_dock()
+            dock_order[0] = self.navigator_dock
+        visible_docks = [dock for dock in dock_order if dock.isVisible()]
+        if len(visible_docks) < 2:
+            visible_docks = dock_order
+        self.addDockWidget(Qt.RightDockWidgetArea, visible_docks[0])
+        for dock in visible_docks[1:]:
+            self.addDockWidget(Qt.RightDockWidgetArea, dock, Qt.Vertical)
+        self.resizeDocks(
+            [
+                self.navigator_dock,
+                self.flag_dock,
+                self.label_dock,
+                self.shape_dock,
+                self.file_dock,
+            ],
+            [220, 160, 160, 200, 220],
+            Qt.Vertical,
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._did_force_right_dock_splits:
+            self._ensure_right_dock_splits()
+            self._did_force_right_dock_splits = True
+
+    def _create_navigator_dock(
+        self,
+    ) -> tuple[NavigatorWidget, QtWidgets.QDockWidget]:
+        navigator = NavigatorWidget()
+        navigator_dock = QtWidgets.QDockWidget(self.tr("Navigator"), self)
+        navigator_dock.setObjectName("Navigator")
+        navigator_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        # Wrap in QScrollArea to allow dock resizing on macOS
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidget(navigator)
+        scroll_area.setWidgetResizable(True)  # Navigator stretches with dock
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        navigator_dock.setWidget(scroll_area)
+        navigator.viewportChangeRequested.connect(self._onNavigatorViewportChange)
+        return navigator, navigator_dock
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
