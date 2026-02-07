@@ -1771,7 +1771,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.shapesBackups.pop()
 
     def scrollRequest(self, delta, orientation):
-        units = -delta * 0.01  # natural scroll (reduced for Wacom compatibility)
+        units = -delta * 0.05  # natural scroll (reduced for Wacom compatibility)
         bar = self.scrollBars[orientation]
         value = bar.value() + bar.singleStep() * units
         self.setScroll(orientation, value)

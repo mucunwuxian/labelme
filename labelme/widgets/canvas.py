@@ -1216,9 +1216,9 @@ class Canvas(QtWidgets.QWidget):
             # zoom
             self.zoomRequest.emit(delta.y(), a0.posF())
         else:
-            # scroll with debounce (50ms interval)
+            # scroll with debounce (20ms interval)
             current_time = time.time()
-            if current_time - self._last_scroll_time < 0.05:
+            if current_time - self._last_scroll_time < 0.02:
                 a0.accept()
                 return
             self._last_scroll_time = current_time
