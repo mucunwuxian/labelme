@@ -71,15 +71,23 @@ if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
 
 
 # Use matplotlib's tab20 colormap for label colors
-# Reorder: dark colors first (even indices), then light colors (odd indices)
+# Exclude gray (14,15) for better visibility
+# Reorder: dark colors first, then light colors
 import matplotlib.pyplot as plt
 _tab20_cmap = plt.cm.get_cmap("tab20")
-_dark_colors = [_tab20_cmap(i / 20)[:3] for i in range(0, 20, 2)]  # 0,2,4,...,18
-_light_colors = [_tab20_cmap(i / 20)[:3] for i in range(1, 20, 2)]  # 1,3,5,...,19
+# Keep: blue(0,1), orange(2,3), green(4,5), red(6,7), purple(8,9), brown(10,11), pink(12,13), olive(16,17), cyan(18,19)
+_keep_dark = [0, 2, 4, 6, 8, 10, 12, 16, 18]
+_keep_light = [1, 3, 5, 7, 9, 11, 13, 17, 19]
+_dark_colors = [_tab20_cmap(i / 20)[:3] for i in _keep_dark]
+_light_colors = [_tab20_cmap(i / 20)[:3] for i in _keep_light]
 LABEL_COLORMAP: NDArray[np.uint8] = np.array(
     _dark_colors + _light_colors, dtype=np.float32
 ) * 255
 LABEL_COLORMAP = LABEL_COLORMAP.astype(np.uint8)
+# Replace dark red with custom red #b7282e
+LABEL_COLORMAP[3] = [183, 40, 46]  # dark red position (index 6 in tab20 -> position 3 in dark colors)
+# Replace dark brown with custom color #556B2F
+LABEL_COLORMAP[5] = [85, 107, 47]  # dark brown position (index 10 in tab20 -> position 5 in dark colors)
 
 
 class _ZoomMode(enum.Enum):

@@ -230,6 +230,7 @@ class Shape:
             line_path = QtGui.QPainterPath()
             vrtx_path = QtGui.QPainterPath()
             negative_vrtx_path = QtGui.QPainterPath()
+            start_vrtx_path = QtGui.QPainterPath()
 
             if self.shape_type in ["rectangle", "mask"]:
                 if len(self.points) == 2:
@@ -290,7 +291,6 @@ class Shape:
                 # may be desirable.
                 # self.drawVertex(vrtx_path, 0)
 
-                start_vrtx_path = QtGui.QPainterPath()
                 for i, p in enumerate(self.points):
                     line_path.lineTo(self._scale_point(p))
                     # Draw start vertex separately when creating (for white color)
@@ -328,15 +328,17 @@ class Shape:
         d = self.point_size
         shape = self.point_type
         point = self._scale_point(self.points[i])
-        # Point shapes use larger size (16) for better visibility
+        # Point shapes use larger size (12) for better visibility
         if self.shape_type == "point":
-            d = 16
+            d = 12
         if i == self._highlightIndex:
             size, shape = self._highlightSettings[self._highlightMode]
             d *= size  # type: ignore[assignment]
-        # For point shapes, always use vertex_fill_color to maintain visibility
+        # For point shapes, use semi-transparent vertex_fill_color
         if self.shape_type == "point":
-            self._current_vertex_fill_color = self.vertex_fill_color
+            color = QtGui.QColor(self.vertex_fill_color)
+            color.setAlpha(self.fill_color.alpha())  # Use same alpha as fill
+            self._current_vertex_fill_color = color
         elif self._is_creating and i == 0:
             # Draw starting vertex in white during polygon creation
             self._current_vertex_fill_color = QtGui.QColor(255, 255, 255)

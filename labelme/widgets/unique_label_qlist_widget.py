@@ -37,10 +37,8 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
 
         item = QtWidgets.QListWidgetItem()
         item.setData(Qt.UserRole, label)  # for find_label_item
-        item.setText(
-            f"{html.escape(label)} "
-            f"<font color='#{color[0]:02x}{color[1]:02x}{color[2]:02x}'>●</font>"
-        )
+        # Store color for refresh
+        item.setData(Qt.UserRole + 1, color)
         if sorted_insert:
             # Insert in sorted order (by label name)
             insert_row = 0
@@ -50,5 +48,24 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
                     break
                 insert_row = row + 1
             self.insertItem(insert_row, item)
+            # Refresh all indices after insertion
+            self._refresh_indices()
         else:
             self.addItem(item)
+            self._update_item_text(item, self.count() - 1)
+
+    def _update_item_text(self, item: QtWidgets.QListWidgetItem, index: int) -> None:
+        """Update item text with index."""
+        label = item.data(Qt.UserRole)
+        color = item.data(Qt.UserRole + 1)
+        item.setText(
+            f"{index}: {html.escape(label)} "
+            f"<font color='#{color[0]:02x}{color[1]:02x}{color[2]:02x}'>●</font>"
+        )
+
+    def _refresh_indices(self) -> None:
+        """Refresh all item indices after insertion."""
+        for row in range(self.count()):
+            item = self.item(row)
+            if item:
+                self._update_item_text(item, row)
