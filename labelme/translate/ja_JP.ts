@@ -309,6 +309,11 @@
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Navigator</source>
+        <translation>ナビゲータ</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>Progress
 &amp;Stats</source>
         <translation>進捗

@@ -47,6 +47,7 @@ from labelme.widgets import FileDialogPreview
 from labelme.widgets import LabelDialog
 from labelme.widgets import LabelListWidget
 from labelme.widgets import LabelListWidgetItem
+from labelme.widgets import NavigatorWidget
 from labelme.widgets import StatusStats
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
@@ -176,6 +177,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList = LabelListWidget()
         self._prev_opened_dir = None
 
+        # Navigator (minimap)
+        self.navigator = NavigatorWidget()
+        self.navigator_dock = QtWidgets.QDockWidget(self.tr("Navigator"), self)
+        self.navigator_dock.setObjectName("Navigator")
+        self.navigator_dock.setWidget(self.navigator)
+        self.navigator.viewportChangeRequested.connect(self._onNavigatorViewportChange)
+
         self.flag_dock = self.flag_widget = None
         self.flag_dock = QtWidgets.QDockWidget(self.tr("Flags"), self)
         self.flag_dock.setObjectName("Flags")
@@ -199,9 +207,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Select label to start annotating for it. Press 'Esc' to deselect.")
         )
         if self._config["labels"]:
-            for label in self._config["labels"]:
+            for label in sorted(self._config["labels"]):
                 self.uniqLabelList.add_label_item(
-                    label=label, color=self._get_rgb_by_label(label=label)
+                    label=label, color=self._get_rgb_by_label(label=label),
+                    sorted_insert=True,
                 )
         self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
         self.label_dock.setObjectName("Label List")
@@ -260,12 +269,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.mouseMoved.connect(self._update_status_stats)
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
 
-        scrollArea = QtWidgets.QScrollArea()
-        scrollArea.setWidget(self.canvas)
-        scrollArea.setWidgetResizable(True)
+        self.scrollArea = QtWidgets.QScrollArea()
+        self.scrollArea.setWidget(self.canvas)
+        self.scrollArea.setWidgetResizable(True)
         self.scrollBars = {
-            Qt.Vertical: scrollArea.verticalScrollBar(),
-            Qt.Horizontal: scrollArea.horizontalScrollBar(),
+            Qt.Vertical: self.scrollArea.verticalScrollBar(),
+            Qt.Horizontal: self.scrollArea.horizontalScrollBar(),
         }
         self.canvas.scrollRequest.connect(self.scrollRequest)
 
@@ -274,7 +283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
 
-        self.setCentralWidget(scrollArea)
+        self.setCentralWidget(self.scrollArea)
 
         features = QtWidgets.QDockWidget.DockWidgetFeatures()
         for dock in ["flag_dock", "label_dock", "shape_dock", "file_dock"]:
@@ -288,6 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._config[dock]["show"] is False:
                 getattr(self, dock).setVisible(False)
 
+        self.addDockWidget(Qt.RightDockWidgetArea, self.navigator_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.flag_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.shape_dock)
@@ -1180,6 +1190,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_changed = True
         self.actions.save.setEnabled(True)
         self.setWindowTitle(self._get_window_title(dirty=True))
+        self.navigator.setShapes(self.canvas.shapes)
 
     def setClean(self):
         self._is_changed = False
@@ -1513,11 +1524,34 @@ class MainWindow(QtWidgets.QMainWindow):
             text = shape.label
         else:
             text = f"{shape.label} ({shape.group_id})"
+
+        # Get shape position (bounding rect top-left)
+        if shape.points:
+            x = min(p.x() for p in shape.points)
+            y = min(p.y() for p in shape.points)
+        else:
+            x, y = 0, 0
+
         label_list_item = LabelListWidgetItem(text, shape)
-        self.labelList.addItem(label_list_item)
+
+        # Insert in sorted order (key1: y, key2: x)
+        insert_row = 0
+        for row in range(self.labelList._model.rowCount()):
+            item = self.labelList._model.item(row)
+            if item:
+                other_shape = item.shape()
+                if other_shape and other_shape.points:
+                    other_x = min(p.x() for p in other_shape.points)
+                    other_y = min(p.y() for p in other_shape.points)
+                    if (y, x) < (other_y, other_x):
+                        break
+            insert_row = row + 1
+        self.labelList._model.insertRow(insert_row, label_list_item)
+
         if self.uniqLabelList.find_label_item(shape.label) is None:
             self.uniqLabelList.add_label_item(
-                label=shape.label, color=self._get_rgb_by_label(label=shape.label)
+                label=shape.label, color=self._get_rgb_by_label(label=shape.label),
+                sorted_insert=True,
             )
         self.labelDialog.addLabelHistory(shape.label)
         for action in self.on_shapes_present_actions:
@@ -1526,7 +1560,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_shape_color(shape)
         r, g, b = shape.fill_color.getRgb()[:3]
         label_list_item.setText(
-            f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font>'
+            f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font> ({int(x)},{int(y)})'
         )
 
     def _update_shape_color(self, shape):
@@ -1779,6 +1813,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def setScroll(self, orientation, value):
         self.scrollBars[orientation].setValue(int(value))
         self.scroll_values[orientation][self.filename] = value
+        self._updateNavigatorViewport()
 
     def _set_zoom(self, value: int, pos: QtCore.QPointF | None = None) -> None:
         if self.filename is None:
@@ -1827,6 +1862,81 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _zoom_requested(self, delta: int, pos: QtCore.QPointF) -> None:
         self._add_zoom(increment=1.1 if delta > 0 else 0.9, pos=pos)
+
+    def _updateNavigatorViewport(self):
+        """Update the navigator's viewport rectangle based on current scroll/zoom."""
+        if not self.canvas.pixmap or self.canvas.pixmap.isNull():
+            return
+
+        # Get image dimensions
+        img_w = self.canvas.pixmap.width()
+        img_h = self.canvas.pixmap.height()
+        if img_w == 0 or img_h == 0:
+            return
+
+        # Get scrollbar positions and ranges
+        h_bar = self.scrollBars[Qt.Horizontal]
+        v_bar = self.scrollBars[Qt.Vertical]
+
+        # Calculate visible area in image coordinates
+        scale = self.canvas.scale
+        view_w = self.scrollArea.viewport().width() / scale
+        view_h = self.scrollArea.viewport().height() / scale
+
+        # Scroll position to image coordinates
+        h_max = h_bar.maximum()
+        v_max = v_bar.maximum()
+
+        if h_max > 0:
+            x = (h_bar.value() / h_max) * max(0, img_w - view_w)
+        else:
+            x = 0
+        if v_max > 0:
+            y = (v_bar.value() / v_max) * max(0, img_h - view_h)
+        else:
+            y = 0
+
+        # Convert to ratios (0-1)
+        x_ratio = x / img_w
+        y_ratio = y / img_h
+        w_ratio = min(1.0, view_w / img_w)
+        h_ratio = min(1.0, view_h / img_h)
+
+        self.navigator.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
+        self.navigator.setShapes(self.canvas.shapes)
+
+    def _onNavigatorViewportChange(self, x_ratio: float, y_ratio: float):
+        """Handle click on navigator to move viewport center."""
+        if not self.canvas.pixmap or self.canvas.pixmap.isNull():
+            return
+
+        img_w = self.canvas.pixmap.width()
+        img_h = self.canvas.pixmap.height()
+        scale = self.canvas.scale
+
+        view_w = self.scrollArea.viewport().width() / scale
+        view_h = self.scrollArea.viewport().height() / scale
+
+        # Calculate target scroll position (center on clicked point)
+        target_x = x_ratio * img_w - view_w / 2
+        target_y = y_ratio * img_h - view_h / 2
+
+        # Convert to scrollbar values
+        h_bar = self.scrollBars[Qt.Horizontal]
+        v_bar = self.scrollBars[Qt.Vertical]
+
+        max_scroll_x = max(0, img_w - view_w)
+        max_scroll_y = max(0, img_h - view_h)
+
+        if max_scroll_x > 0 and h_bar.maximum() > 0:
+            h_value = (target_x / max_scroll_x) * h_bar.maximum()
+            h_value = max(0, min(h_bar.maximum(), h_value))
+            self.setScroll(Qt.Horizontal, h_value)
+
+        if max_scroll_y > 0 and v_bar.maximum() > 0:
+            v_value = (target_y / max_scroll_y) * v_bar.maximum()
+            v_value = max(0, min(v_bar.maximum(), v_value))
+            self.setScroll(Qt.Vertical, v_value)
 
     def _line_opacity_changed(self, value: int) -> None:
         """Update line opacity for all shapes."""
@@ -2004,7 +2114,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self.image = image
         self.filename = filename
-        self.canvas.loadPixmap(QtGui.QPixmap.fromImage(image))
+        pixmap = QtGui.QPixmap.fromImage(image)
+        self.canvas.loadPixmap(pixmap)
+        self.navigator.setPixmap(pixmap)
         flags = {k: False for k in self._config["flags"] or []}
         if self.labelFile:
             self._load_shape_dicts(shape_dicts=self.labelFile.shapes)
@@ -2060,6 +2172,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.scale = 0.01 * self.zoomWidget.value()
         self.canvas.adjustSize()
         self.canvas.update()
+        self._updateNavigatorViewport()
 
     def _adjust_scale(self) -> None:
         self._set_zoom(value=int(self.scalers[self._zoom_mode]() * 100))

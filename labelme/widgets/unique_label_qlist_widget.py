@@ -31,7 +31,7 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
                 return item
         return None
 
-    def add_label_item(self, label: str, color: tuple[int, int, int]) -> None:
+    def add_label_item(self, label: str, color: tuple[int, int, int], sorted_insert: bool = False) -> None:
         if self.find_label_item(label):
             raise ValueError(f"Item for label '{label}' already exists")
 
@@ -41,4 +41,14 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
             f"{html.escape(label)} "
             f"<font color='#{color[0]:02x}{color[1]:02x}{color[2]:02x}'>●</font>"
         )
-        self.addItem(item)
+        if sorted_insert:
+            # Insert in sorted order (by label name)
+            insert_row = 0
+            for row in range(self.count()):
+                existing = self.item(row)
+                if existing and existing.data(Qt.UserRole) > label:
+                    break
+                insert_row = row + 1
+            self.insertItem(insert_row, item)
+        else:
+            self.addItem(item)
