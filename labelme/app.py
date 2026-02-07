@@ -194,6 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shape_dock.setWidget(self.labelList)
 
         self.uniqLabelList = UniqueLabelQListWidget()
+        self._label_color_map: dict[str, int] = {}  # label -> color index
         self.uniqLabelList.setToolTip(
             self.tr("Select label to start annotating for it. Press 'Esc' to deselect.")
         )
@@ -1544,19 +1545,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_rgb_by_label(self, label: str) -> tuple[int, int, int]:
         if self._config["shape_color"] == "auto":
-            item = self.uniqLabelList.find_label_item(label)
-            item_index: int = (
-                self.uniqLabelList.indexFromItem(item).row()
-                if item
-                else self.uniqLabelList.count()
-            )
-            label_id: int = (
-                0  # tab20 has no black, start from index 0
-                + item_index
-                + self._config["shift_auto_shape_color"]
-            )
+            if label in self._label_color_map:
+                label_id = self._label_color_map[label]
+            else:
+                # Assign next available color index
+                used_indices = set(self._label_color_map.values())
+                label_id = 0
+                while label_id in used_indices:
+                    label_id += 1
+                self._label_color_map[label] = label_id
+            label_id = (
+                label_id + self._config["shift_auto_shape_color"]
+            ) % len(LABEL_COLORMAP)
             rgb: tuple[int, int, int] = tuple(
-                LABEL_COLORMAP[label_id % len(LABEL_COLORMAP)].tolist()
+                LABEL_COLORMAP[label_id].tolist()
             )
             return rgb
         elif (
@@ -1769,7 +1771,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.shapesBackups.pop()
 
     def scrollRequest(self, delta, orientation):
-        units = -delta * 0.1  # natural scroll
+        units = -delta * 0.01  # natural scroll (reduced for Wacom compatibility)
         bar = self.scrollBars[orientation]
         value = bar.value() + bar.singleStep() * units
         self.setScroll(orientation, value)
@@ -2821,6 +2823,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileListWidget.clear()
 
         filenames = _scan_image_files(root_dir=root_dir)
+
+        # Collect all labels from JSON files and assign colors in sorted order
+        all_labels: set[str] = set()
+        for filename in filenames:
+            label_file = f"{osp.splitext(filename)[0]}.json"
+            if self.output_dir:
+                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            if osp.exists(label_file):
+                try:
+                    with open(label_file, encoding="utf-8") as f:
+                        data = json.load(f)
+                    for shape in data.get("shapes", []):
+                        if shape.get("label"):
+                            all_labels.add(shape["label"])
+                except Exception:
+                    pass
+        # Reset and assign colors in sorted order
+        self._label_color_map = {}
+        for i, label in enumerate(sorted(all_labels)):
+            self._label_color_map[label] = i
         if pattern:
             try:
                 filenames = [f for f in filenames if re.search(pattern, f)]
