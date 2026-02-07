@@ -152,6 +152,9 @@ class Canvas(QtWidgets.QWidget):
         self._hover_label_timer.timeout.connect(self._onHoverLabelTimeout)
         self._mouse_pressed = False
 
+        # Scroll debounce
+        self._last_scroll_time = 0.0
+
     def fillDrawing(self):
         return self._fill_drawing
 
@@ -1204,6 +1207,8 @@ class Canvas(QtWidgets.QWidget):
         return min_size
 
     def wheelEvent(self, a0: QtGui.QWheelEvent) -> None:
+        import time
+
         mods: Qt.KeyboardModifiers = a0.modifiers()
         delta: QPoint = a0.angleDelta()
         if Qt.ControlModifier == int(mods):
@@ -1211,7 +1216,12 @@ class Canvas(QtWidgets.QWidget):
             # zoom
             self.zoomRequest.emit(delta.y(), a0.posF())
         else:
-            # scroll
+            # scroll with debounce (50ms interval)
+            current_time = time.time()
+            if current_time - self._last_scroll_time < 0.05:
+                a0.accept()
+                return
+            self._last_scroll_time = current_time
             self.scrollRequest.emit(delta.x(), Qt.Horizontal)
             self.scrollRequest.emit(delta.y(), Qt.Vertical)
         a0.accept()
