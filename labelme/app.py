@@ -2455,8 +2455,12 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.output_file:
             self._saveFile(self.output_file)
             self.close()
-        else:
+        elif self.filename:
             self._saveFile(self.saveFileDialog())
+        else:
+            # No filename set, cannot save
+            logger.warning("Cannot save: no filename set")
+            return
 
     def saveFileAs(self, _value=False):
         assert not self.image.isNull(), "cannot save empty image"
