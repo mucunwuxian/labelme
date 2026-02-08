@@ -212,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shape_dock.setWidget(self.labelList)
 
         self.uniqLabelList = UniqueLabelQListWidget()
+        self.uniqLabelList.setColormap(LABEL_COLORMAP)
         self._label_color_map: dict[str, int] = {}  # label -> color index
         self.uniqLabelList.setToolTip(
             self.tr("Select label to start annotating for it. Press 'Esc' to deselect.")
@@ -1667,15 +1668,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_rgb_by_label(self, label: str) -> tuple[int, int, int]:
         if self._config["shape_color"] == "auto":
-            if label in self._label_color_map:
-                label_id = self._label_color_map[label]
-            else:
-                # Assign next available color index
-                used_indices = set(self._label_color_map.values())
-                label_id = 0
-                while label_id in used_indices:
-                    label_id += 1
-                self._label_color_map[label] = label_id
+            # Use label's position in the sorted label list for consistent colors
+            label_id = self.uniqLabelList.get_label_index(label)
+            if label_id is None:
+                # Label not in list yet, use next available index
+                label_id = self.uniqLabelList.count()
             label_id = (
                 label_id + self._config["shift_auto_shape_color"]
             ) % len(LABEL_COLORMAP)
@@ -1701,6 +1698,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._config["default_shape_color"]
         return (0, 255, 0)
 
+    def _refresh_all_shape_colors(self):
+        """Refresh colors of all shapes based on current uniqLabelList indices."""
+        for row in range(self.labelList._model.rowCount()):
+            item = self.labelList._model.item(row)
+            if item:
+                shape = item.shape()
+                if shape:
+                    self._update_shape_color(shape)
+                    # Update label list item text
+                    if shape.group_id is None:
+                        text = shape.label
+                    else:
+                        text = f"{shape.label} ({shape.group_id})"
+                    if shape.points:
+                        x = min(p.x() for p in shape.points)
+                        y = min(p.y() for p in shape.points)
+                    else:
+                        x, y = 0, 0
+                    r, g, b = shape.fill_color.getRgb()[:3]
+                    item.setText(
+                        f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font> ({int(x)},{int(y)})'
+                    )
+
     def remLabels(self, shapes):
         for shape in shapes:
             item = self.labelList.findItemByShape(shape)
@@ -1711,6 +1731,9 @@ class MainWindow(QtWidgets.QMainWindow):
         shape: Shape
         for shape in shapes:
             self.addLabel(shape)
+        # Re-update all shape colors after all labels are added to uniqLabelList
+        # This is necessary because sorted insertion may change label indices
+        self._refresh_all_shape_colors()
         self.labelList.clearSelection()
         self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
         self.canvas.loadShapes(shapes=shapes, replace=replace)
@@ -1826,7 +1849,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pasteSelectedShape()
 
     def pasteSelectedShape(self):
-        self._load_shapes(shapes=self._copied_shapes, replace=False)
+        # Create copies with offset
+        offset = 20
+        new_shapes = []
+        for shape in self._copied_shapes:
+            new_shape = shape.copy()
+            for point in new_shape.points:
+                point.setX(point.x() + offset)
+                point.setY(point.y() + offset)
+            new_shapes.append(new_shape)
+        # Update _copied_shapes with offset for next paste
+        self._copied_shapes = new_shapes
+        # Create shapes to load (copies to avoid reusing same objects)
+        shapes_to_load = [s.copy() for s in new_shapes]
+        self._load_shapes(shapes=shapes_to_load, replace=False)
+        # Select only the newly pasted shapes
+        self.canvas.selectShapes(shapes_to_load)
         self.setDirty()
 
     def copySelectedShape(self):
@@ -1962,33 +2000,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if img_w == 0 or img_h == 0:
             return
 
-        # Get scrollbar positions and ranges
+        scale = self.canvas.scale
+
+        # Get scrollbar positions
         h_bar = self.scrollBars[Qt.Horizontal]
         v_bar = self.scrollBars[Qt.Vertical]
 
-        # Calculate visible area in image coordinates
-        scale = self.canvas.scale
+        # Canvas centers the image using offsetToCenter()
+        offset = self.canvas.offsetToCenter()
+
+        # Scroll position in widget coords -> image coords, accounting for centering offset
+        x = (h_bar.value() / scale) - offset.x()
+        y = (v_bar.value() / scale) - offset.y()
+
+        # Visible area in image coordinates
         view_w = self.scrollArea.viewport().width() / scale
         view_h = self.scrollArea.viewport().height() / scale
 
-        # Scroll position to image coordinates
-        h_max = h_bar.maximum()
-        v_max = v_bar.maximum()
+        # Calculate the visible rectangle clipped to image bounds
+        x1 = max(0.0, x)
+        y1 = max(0.0, y)
+        x2 = min(float(img_w), x + view_w)
+        y2 = min(float(img_h), y + view_h)
 
-        if h_max > 0:
-            x = (h_bar.value() / h_max) * max(0, img_w - view_w)
-        else:
-            x = 0
-        if v_max > 0:
-            y = (v_bar.value() / v_max) * max(0, img_h - view_h)
-        else:
-            y = 0
+        # Clipped width and height
+        clipped_w = max(0.0, x2 - x1)
+        clipped_h = max(0.0, y2 - y1)
 
         # Convert to ratios (0-1)
-        x_ratio = x / img_w
-        y_ratio = y / img_h
-        w_ratio = min(1.0, view_w / img_w)
-        h_ratio = min(1.0, view_h / img_h)
+        x_ratio = x1 / img_w
+        y_ratio = y1 / img_h
+        w_ratio = clipped_w / img_w
+        h_ratio = clipped_h / img_h
 
         self.navigator.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
         self.navigator.setShapes(self.canvas.shapes)
@@ -2936,6 +2979,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self.remLabels(self.canvas.deleteSelected())
             self.setDirty()
+            # Disable selection-dependent actions since nothing is selected now
+            self.actions.delete.setEnabled(False)
+            self.actions.duplicate.setEnabled(False)
+            self.actions.copy.setEnabled(False)
+            self.actions.edit.setEnabled(False)
             if self.noShapes():
                 for action in self.on_shapes_present_actions:
                     action.setEnabled(False)

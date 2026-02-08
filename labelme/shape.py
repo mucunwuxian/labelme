@@ -334,6 +334,9 @@ class Shape:
         if i == self._highlightIndex:
             size, shape = self._highlightSettings[self._highlightMode]
             d *= size  # type: ignore[assignment]
+        # For point shapes: show as square when selected or highlighted
+        if self.shape_type == "point" and (self.selected or i == self._highlightIndex):
+            shape = self.P_SQUARE
         # For point shapes, use semi-transparent vertex_fill_color
         if self.shape_type == "point":
             color = QtGui.QColor(self.vertex_fill_color)

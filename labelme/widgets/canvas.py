@@ -433,18 +433,6 @@ class Canvas(QtWidgets.QWidget):
             self._update_status()
             return
 
-        # Polygon copy moving.
-        if Qt.RightButton & a0.buttons():
-            if self.selectedShapesCopy and self.prevPoint is not None:
-                self.overrideCursor(CURSOR_MOVE)
-                self.boundedMoveShapes(self.selectedShapesCopy, pos)
-                self.repaint()
-            elif self.selectedShapes:
-                self.selectedShapesCopy = [s.copy() for s in self.selectedShapes]
-                self.repaint()
-            self._update_status()
-            return
-
         # Polygon/Vertex moving.
         if Qt.LeftButton & a0.buttons():
             if self.selectedVertex():
@@ -677,7 +665,15 @@ class Canvas(QtWidgets.QWidget):
                     shape.highlightVertex(0, shape.MOVE_VERTEX)
             self._context_menu_active = True
             self.repaint()
-            self.prevPoint = pos
+            # Show context menu immediately on press
+            menu = self.menus[0]
+            menu.exec_(self.mapToGlobal(a0.pos()))
+            # Clean up after menu closes
+            self._context_menu_active = False
+            for shape in self.selectedShapes:
+                if shape.shape_type == "point":
+                    shape.highlightClear()
+            self.repaint()
         elif a0.button() == Qt.MiddleButton and self._is_dragging_enabled:
             self.overrideCursor(CURSOR_GRAB)
             self._dragging_start_pos = pos
@@ -687,20 +683,7 @@ class Canvas(QtWidgets.QWidget):
     def mouseReleaseEvent(self, a0: QtGui.QMouseEvent) -> None:
         self._mouse_pressed = False
 
-        if a0.button() == Qt.RightButton:
-            menu = self.menus[len(self.selectedShapesCopy) > 0]
-            self.restoreCursor()
-            if not menu.exec_(self.mapToGlobal(a0.pos())) and self.selectedShapesCopy:  # type: ignore
-                # Cancel the move by deleting the shadow copy.
-                self.selectedShapesCopy = []
-                self.repaint()
-            self._context_menu_active = False
-            # Clear highlight for point shapes after context menu closes
-            for shape in self.selectedShapes:
-                if shape.shape_type == "point":
-                    shape.highlightClear()
-            self.repaint()
-        elif a0.button() == Qt.LeftButton:
+        if a0.button() == Qt.LeftButton:
             if self.editing():
                 if (
                     self.hShape is not None
@@ -1125,6 +1108,7 @@ class Canvas(QtWidgets.QWidget):
         self.storeShapes()
         self.current = None
         self.setHiding(False)
+        self.drawingPolygon.emit(False)  # Reset drawing state
         self.newShape.emit()
         self.update()
 
