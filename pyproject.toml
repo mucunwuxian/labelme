@@ -31,6 +31,7 @@ dependencies = [
   "pyqt5>=5.14.0",
   "pyqt5-qt5!=5.15.13 ; sys_platform == 'linux'",
   "pyqt5-qt5!=5.15.11,!=5.15.12,!=5.15.13,!=5.15.14,!=5.15.15,!=5.15.16 ; sys_platform == 'win32'",
+  "pyobjc ; sys_platform == 'darwin'",
   "pyyaml",
   "scikit-image",
 ]

@@ -251,7 +251,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lineOpacityWidget.setSuffix(" %")
         self.lineOpacityWidget.setSingleStep(5)  # 5% increments
         self.lineOpacityWidget.valueChanged.connect(self._line_opacity_changed)
-        self.lineOpacityWidget.setValue(60)  # Default 60% transparency
+        self.lineOpacityWidget.setValue(70)  # Default 70% transparency
+
+        # Vertex opacity spinbox (for polygon corners)
+        self.pointOpacityWidget = QtWidgets.QSpinBox()
+        self.pointOpacityWidget.setRange(0, 95)  # Max 95% to keep vertices visible
+        self.pointOpacityWidget.setSuffix(" %")
+        self.pointOpacityWidget.setSingleStep(5)  # 5% increments
+        self.pointOpacityWidget.valueChanged.connect(self._vertex_opacity_changed)
+        self.pointOpacityWidget.setValue(50)  # Default 50% transparency
 
         # Fill opacity spinbox
         self.fillOpacityWidget = QtWidgets.QSpinBox()
@@ -266,7 +274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lineWidthWidget.setRange(1, 10)
         self.lineWidthWidget.setSuffix(" px")
         self.lineWidthWidget.valueChanged.connect(self._line_width_changed)
-        self.lineWidthWidget.setValue(5)  # Default line width
+        self.lineWidthWidget.setValue(6)  # Default line width
 
         self.setAcceptDrops(True)
 
@@ -293,6 +301,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
+        self.canvas.editModeChanged.connect(self._onEditModeChanged)
 
         self.setCentralWidget(self.scrollArea)
 
@@ -630,17 +639,27 @@ class MainWindow(QtWidgets.QMainWindow):
         # Line opacity widget
         lineOpacity = QtWidgets.QWidgetAction(self)
         lineOpacityBoxLayout = QtWidgets.QVBoxLayout()
-        lineOpacityLabel = QtWidgets.QLabel(self.tr("Line\nOpacity"))
+        lineOpacityLabel = QtWidgets.QLabel(self.tr("線の\n透明度"))
         lineOpacityLabel.setAlignment(Qt.AlignCenter)
         lineOpacityBoxLayout.addWidget(lineOpacityLabel)
         lineOpacityBoxLayout.addWidget(self.lineOpacityWidget)
         lineOpacity.setDefaultWidget(QtWidgets.QWidget())
         lineOpacity.defaultWidget().setLayout(lineOpacityBoxLayout)
 
+        # Point opacity widget
+        pointOpacity = QtWidgets.QWidgetAction(self)
+        pointOpacityBoxLayout = QtWidgets.QVBoxLayout()
+        pointOpacityLabel = QtWidgets.QLabel(self.tr("頂点の\n透明度"))
+        pointOpacityLabel.setAlignment(Qt.AlignCenter)
+        pointOpacityBoxLayout.addWidget(pointOpacityLabel)
+        pointOpacityBoxLayout.addWidget(self.pointOpacityWidget)
+        pointOpacity.setDefaultWidget(QtWidgets.QWidget())
+        pointOpacity.defaultWidget().setLayout(pointOpacityBoxLayout)
+
         # Fill opacity widget
         fillOpacity = QtWidgets.QWidgetAction(self)
         fillOpacityBoxLayout = QtWidgets.QVBoxLayout()
-        fillOpacityLabel = QtWidgets.QLabel(self.tr("Fill\nOpacity"))
+        fillOpacityLabel = QtWidgets.QLabel(self.tr("塗りの\n透明度"))
         fillOpacityLabel.setAlignment(Qt.AlignCenter)
         fillOpacityBoxLayout.addWidget(fillOpacityLabel)
         fillOpacityBoxLayout.addWidget(self.fillOpacityWidget)
@@ -650,7 +669,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Line width widget
         lineWidth = QtWidgets.QWidgetAction(self)
         lineWidthBoxLayout = QtWidgets.QVBoxLayout()
-        lineWidthLabel = QtWidgets.QLabel(self.tr("Line Width"))
+        lineWidthLabel = QtWidgets.QLabel(self.tr("線の太さ"))
         lineWidthLabel.setAlignment(Qt.AlignCenter)
         lineWidthBoxLayout.addWidget(lineWidthLabel)
         lineWidthBoxLayout.addWidget(self.lineWidthWidget)
@@ -1013,6 +1032,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     fitWindow,
                     zoom,
                     lineOpacity,
+                    pointOpacity,
                     fillOpacity,
                     lineWidth,
                     None,
@@ -1098,10 +1118,12 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._ensure_right_dock_splits)
 
         # Restore opacity and line width settings
-        lineOpacity = self.settings.value("canvas/lineOpacity", 60, type=int)
+        lineOpacity = self.settings.value("canvas/lineOpacity", 70, type=int)
+        pointOpacity = self.settings.value("canvas/pointOpacity", 50, type=int)
         fillOpacity = self.settings.value("canvas/fillOpacity", 80, type=int)
-        lineWidth = self.settings.value("canvas/lineWidth", 5, type=int)
+        lineWidth = self.settings.value("canvas/lineWidth", 6, type=int)
         self.lineOpacityWidget.setValue(lineOpacity)
+        self.pointOpacityWidget.setValue(pointOpacity)
         self.fillOpacityWidget.setValue(fillOpacity)
         self.lineWidthWidget.setValue(lineWidth)
 
@@ -1425,7 +1447,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.editMode.setEnabled(not drawing)
         self.actions.undoLastPoint.setEnabled(drawing)
         self.actions.undo.setEnabled(not drawing)
-        self.actions.delete.setEnabled(not drawing)
+        # delete/duplicate/copy: only enable if not drawing AND shapes are selected
+        n_selected = len(self.canvas.selectedShapes) if not drawing else 0
+        self.actions.delete.setEnabled(n_selected > 0)
+        self.actions.duplicate.setEnabled(n_selected > 0)
+        self.actions.copy.setEnabled(n_selected > 0)
+
+    def _onEditModeChanged(self, edit: bool) -> None:
+        """Handle edit mode change from canvas (e.g., right-click to switch)."""
+        if edit:
+            for _, draw_action in self.draw_actions:
+                draw_action.setEnabled(True)
+        self.actions.editMode.setEnabled(not edit)
 
     def _switch_canvas_mode(
         self, edit: bool = True, createMode: str | None = None
@@ -1659,9 +1692,11 @@ class MainWindow(QtWidgets.QMainWindow):
         lineAlpha = int((100 - lineOpacity) * 255 / 100)
         fillOpacity = self.fillOpacityWidget.value()
         fillAlpha = int((100 - fillOpacity) * 255 / 100)
+        vertexOpacity = self.pointOpacityWidget.value()
+        vertexAlpha = int((100 - vertexOpacity) * 255 / 100)
         shape.line_color = QtGui.QColor(r, g, b, lineAlpha)
-        shape.vertex_fill_color = QtGui.QColor(r, g, b)
-        shape.hvertex_fill_color = QtGui.QColor(255, 255, 255)
+        shape.vertex_fill_color = QtGui.QColor(r, g, b, vertexAlpha)
+        shape.hvertex_fill_color = QtGui.QColor(255, 255, 255, 100)  # 70% transparency
         shape.fill_color = QtGui.QColor(r, g, b, fillAlpha)
         shape.select_line_color = QtGui.QColor(255, 255, 255)
         shape.select_fill_color = QtGui.QColor(r, g, b, min(fillAlpha + 50, 255))
@@ -1877,8 +1912,61 @@ class MainWindow(QtWidgets.QMainWindow):
             selected_shapes.append(item.shape())
         if selected_shapes:
             self.canvas.selectShapes(selected_shapes)
+            # Center viewport on selected shape if it's outside the visible area
+            self._center_on_shape(selected_shapes[0])
         else:
             self.canvas.deSelectShape()
+
+    def _center_on_shape(self, shape: Shape) -> None:
+        """Center the viewport on the given shape if it's outside visible area."""
+        if not self.canvas.pixmap or self.canvas.pixmap.isNull():
+            return
+        if not shape.points:
+            return
+
+        # Calculate shape center
+        xs = [p.x() for p in shape.points]
+        ys = [p.y() for p in shape.points]
+        shape_center_x = (min(xs) + max(xs)) / 2
+        shape_center_y = (min(ys) + max(ys)) / 2
+
+        img_w = self.canvas.pixmap.width()
+        img_h = self.canvas.pixmap.height()
+        scale = self.canvas.scale
+
+        view_w = self.scrollArea.viewport().width() / scale
+        view_h = self.scrollArea.viewport().height() / scale
+
+        h_bar = self.scrollBars[Qt.Horizontal]
+        v_bar = self.scrollBars[Qt.Vertical]
+
+        # Calculate current visible area
+        offset = self.canvas.offsetToCenter()
+        current_x = (h_bar.value() / scale) - offset.x()
+        current_y = (v_bar.value() / scale) - offset.y()
+
+        # Check if shape center is within visible area
+        visible_left = max(0, current_x)
+        visible_top = max(0, current_y)
+        visible_right = min(img_w, current_x + view_w)
+        visible_bottom = min(img_h, current_y + view_h)
+
+        # Add some margin (10% of view size)
+        margin_x = view_w * 0.1
+        margin_y = view_h * 0.1
+
+        is_visible = (
+            visible_left + margin_x <= shape_center_x <= visible_right - margin_x
+            and visible_top + margin_y <= shape_center_y <= visible_bottom - margin_y
+        )
+
+        if is_visible:
+            return  # Shape is already visible, no need to scroll
+
+        # Center on shape using ratio-based navigation
+        x_ratio = shape_center_x / img_w if img_w > 0 else 0.5
+        y_ratio = shape_center_y / img_h if img_h > 0 else 0.5
+        self._onNavigatorViewportChange(x_ratio, y_ratio)
 
     def labelItemChanged(self, item):
         shape = item.shape()
@@ -2082,6 +2170,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     shape.line_color.setAlpha(alpha)
             self.canvas.update()
 
+    def _vertex_opacity_changed(self, value: int) -> None:
+        """Update opacity for vertices (polygon corners)."""
+        # value is transparency (100 = fully transparent, 0 = fully opaque)
+        alpha = int((100 - value) * 255 / 100)
+        # Update vertex_fill_color for all shapes (hvertex_fill_color is fixed at 90%)
+        if hasattr(self, "canvas") and self.canvas is not None:
+            for shape in self.canvas.shapes:
+                if "vertex_fill_color" in shape.__dict__:
+                    shape.vertex_fill_color.setAlpha(alpha)
+            self.canvas.update()
+
     def _fill_opacity_changed(self, value: int) -> None:
         """Update fill opacity for all shapes."""
         # value is transparency (100 = fully transparent, 0 = fully opaque)
@@ -2277,6 +2376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.brightnessContrast(value=False, is_initial_load=True)
         # Apply current opacity and line width settings to loaded shapes
         self._line_opacity_changed(self.lineOpacityWidget.value())
+        self._vertex_opacity_changed(self.pointOpacityWidget.value())
         self._fill_opacity_changed(self.fillOpacityWidget.value())
         self._line_width_changed(self.lineWidthWidget.value())
         self._paint_canvas()
@@ -2338,6 +2438,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("window/state", self.saveState())
         self.settings.setValue("recentFiles", self.recentFiles)
         self.settings.setValue("canvas/lineOpacity", self.lineOpacityWidget.value())
+        self.settings.setValue("canvas/pointOpacity", self.pointOpacityWidget.value())
         self.settings.setValue("canvas/fillOpacity", self.fillOpacityWidget.value())
         self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
         # ask the use for where to save the labels

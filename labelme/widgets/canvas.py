@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import enum
+import os
+import ctypes
+import ctypes.util
 from typing import Literal
 
 import imgviz
@@ -20,6 +23,31 @@ from labelme._automation import polygon_from_mask
 from labelme.shape import Shape
 
 from .download import download_ai_model
+
+try:  # macOS cursor hide/unhide (PyObjC)
+    from AppKit import NSCursor  # type: ignore
+
+    _NSCURSOR_AVAILABLE = True
+except Exception:
+    _NSCURSOR_AVAILABLE = False
+
+try:  # macOS CoreGraphics cursor hide/unhide (more forceful)
+    import Quartz  # type: ignore
+
+    _QUARTZ_AVAILABLE = True
+except Exception:
+    _QUARTZ_AVAILABLE = False
+
+# Fallback for macOS CoreGraphics via ctypes (no Quartz module needed)
+_CG_AVAILABLE = False
+_CG = None
+try:
+    _cg_path = ctypes.util.find_library("ApplicationServices")
+    if _cg_path:
+        _CG = ctypes.cdll.LoadLibrary(_cg_path)
+        _CG_AVAILABLE = True
+except Exception:
+    _CG_AVAILABLE = False
 
 # TODO(unknown):
 # - [maybe] Find optimal epsilon value.
@@ -65,6 +93,7 @@ class Canvas(QtWidgets.QWidget):
     vertexSelected = QtCore.pyqtSignal(bool)
     mouseMoved = QtCore.pyqtSignal(QPointF)
     statusUpdated = QtCore.pyqtSignal(str)
+    editModeChanged = QtCore.pyqtSignal(bool)  # True = edit mode, False = create mode
 
     mode: CanvasMode = CanvasMode.EDIT
 
@@ -108,6 +137,12 @@ class Canvas(QtWidgets.QWidget):
         )
         super().__init__(*args, **kwargs)
 
+        # State flags used by cursor handling during init/reset
+        self._vertex_dragging = False  # True when dragging a vertex
+        self._cursor_debug = os.environ.get("LABELME_CURSOR_DEBUG") == "1"
+        self._ns_cursor_hidden = False
+        self._os_cursor_hidden = False
+
         self.resetState()
 
         # self.line represents:
@@ -116,6 +151,8 @@ class Canvas(QtWidgets.QWidget):
         #   - createMode == 'line': the line
         #   - createMode == 'point': the point
         self.line = Shape()
+        self.line._is_creating = True  # Mark line as creating preview
+        self.line._is_line_preview = True  # Mark as the preview line (not the polygon itself)
         self.prevPoint = QPointF()
         self.prevMovePoint = QPointF()
         self.offsets = QPointF(), QPointF()
@@ -151,6 +188,12 @@ class Canvas(QtWidgets.QWidget):
         self._hover_label_timer.setInterval(500)
         self._hover_label_timer.timeout.connect(self._onHoverLabelTimeout)
         self._mouse_pressed = False
+
+        # Blank cursor for hiding during vertex/polygon operations
+        blank_pixmap = QtGui.QPixmap(32, 32)
+        blank_pixmap.fill(Qt.transparent)
+        blank_pixmap.setDevicePixelRatio(self.devicePixelRatioF())
+        self._blank_cursor = QtGui.QCursor(blank_pixmap, 0, 0)
 
         # Scroll debounce
         self._last_scroll_time = 0.0
@@ -242,16 +285,30 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def enterEvent(self, a0: QtCore.QEvent) -> None:
+        if self._cursor_debug:
+            self._log_cursor_state("enterEvent")
+        if self._vertex_dragging:
+            self.setCursor(self._blank_cursor)
+            self._update_status()
+            return
         self.overrideCursor(self._cursor)
         self._update_status()
 
     def leaveEvent(self, a0: QtCore.QEvent) -> None:
+        if self._cursor_debug:
+            self._log_cursor_state("leaveEvent:before")
         self.unHighlight()
         self.restoreCursor()
+        if self._cursor_debug:
+            self._log_cursor_state("leaveEvent:after")
         self._update_status()
 
     def focusOutEvent(self, a0: QtGui.QFocusEvent) -> None:
+        if self._cursor_debug:
+            self._log_cursor_state("focusOutEvent:before")
         self.restoreCursor()
+        if self._cursor_debug:
+            self._log_cursor_state("focusOutEvent:after")
         self._update_status()
 
     def isVisible(self, shape):  # type: ignore[override]
@@ -360,6 +417,16 @@ class Canvas(QtWidgets.QWidget):
 
         is_shift_pressed = a0.modifiers() & Qt.ShiftModifier
 
+        if self._vertex_dragging:
+            if self._cursor_debug:
+                self._log_cursor_state("mouseMoveEvent:vertex_dragging")
+            # Always force blank cursor while dragging a vertex
+            self._force_blank_cursor()
+            self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
+            self.repaint()
+            self.movingShape = True
+            return
+
         if self._is_dragging:
             self.overrideCursor(CURSOR_GRAB)
             delta: QPointF = pos - self._dragging_start_pos
@@ -374,7 +441,11 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self.line.shape_type = self.createMode
 
-            self.overrideCursor(CURSOR_DRAW)
+            if self.current:
+                # Hide cursor when drawing polygon (show crosshair instead)
+                self.overrideCursor(self._blank_cursor)
+            else:
+                self.overrideCursor(CURSOR_DRAW)
             if not self.current:
                 self.repaint()  # draw crosshair
                 self._update_status()
@@ -435,11 +506,7 @@ class Canvas(QtWidgets.QWidget):
 
         # Polygon/Vertex moving.
         if Qt.LeftButton & a0.buttons():
-            if self.selectedVertex():
-                self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
-                self.repaint()
-                self.movingShape = True
-            elif self.hEdgeMidpoint is not None and self.hShape is not None:
+            if self.hEdgeMidpoint is not None and self.hShape is not None:
                 # Moving rectangle edge midpoint
                 self.boundedMoveEdge(pos)
                 self.repaint()
@@ -572,6 +639,8 @@ class Canvas(QtWidgets.QWidget):
 
     def mousePressEvent(self, a0: QtGui.QMouseEvent) -> None:
         self._mouse_pressed = True
+        if self._cursor_debug:
+            self._log_cursor_state(f"mousePressEvent:{a0.button()}")
 
         pos: QPointF = self.transformPos(a0.localPos())
 
@@ -604,6 +673,10 @@ class Canvas(QtWidgets.QWidget):
                         self.line.point_labels[0] = self.current.point_labels[-1]
                         if a0.modifiers() & Qt.ControlModifier:
                             self.finalise()
+                    if self.current is not None:
+                        # Hide cursor immediately on click during polygon creation
+                        self._force_blank_cursor()
+                        self.repaint()
                 elif not self.outOfPixmap(pos):
                     if self.createMode in ["ai_polygon", "ai_mask"]:
                         if not download_ai_model(
@@ -640,6 +713,8 @@ class Canvas(QtWidgets.QWidget):
                         self.setHiding()
                         self.drawingPolygon.emit(True)
                         self.update()
+                        # Hide cursor immediately on first click of creation
+                        self._force_blank_cursor()
             elif self.editing():
                 if self.selectedEdge() and a0.modifiers() == Qt.AltModifier:
                     self.addPointToEdge()
@@ -648,32 +723,73 @@ class Canvas(QtWidgets.QWidget):
                 ):
                     self.removeSelectedPoint()
 
+                # If no hover vertex is set, resolve the nearest vertex on click
+                if self.hVertex is None:
+                    sorted_shapes = sorted(
+                        [s for s in self.shapes if self.isVisible(s)],
+                        key=lambda s: (
+                            0 if s.shape_type == "point" else 1,
+                            s.boundingRect().width() * s.boundingRect().height(),
+                        ),
+                    )
+                    for shape in sorted_shapes:
+                        index = shape.nearestVertex(pos, self.epsilon)
+                        if index is not None:
+                            if self.selectedVertex() and self.hShape:
+                                self.hShape.highlightClear()
+                            self.prevhVertex = self.hVertex = index
+                            self.prevhShape = self.hShape = shape
+                            self.prevhEdge = self.hEdge
+                            self.hEdge = None
+                            self.prevhEdgeMidpoint = self.hEdgeMidpoint
+                            self.hEdgeMidpoint = None
+                            shape.highlightVertex(index, shape.MOVE_VERTEX)
+                            break
+
                 group_mode = int(a0.modifiers()) == Qt.ControlModifier
                 self.selectShapePoint(pos, multiple_selection_mode=group_mode)
                 self.prevPoint = pos
+                # Start vertex dragging if a vertex is selected
+                if self.hVertex is not None:
+                    self._vertex_dragging = True
+                    self.prevMovePoint = pos  # Set immediately for crosshair
+                    self._force_blank_cursor()
                 self.repaint()
-        elif a0.button() == Qt.RightButton and self.editing():
-            group_mode = int(a0.modifiers()) == Qt.ControlModifier
-            if not self.selectedShapes or (
-                self.hShape is not None and self.hShape not in self.selectedShapes
-            ):
-                self.selectShapePoint(pos, multiple_selection_mode=group_mode)
+        elif a0.button() == Qt.RightButton:
+            if self.drawing():
+                # Switch from create mode to edit mode
+                self.current = None
+                self.line.points = []
+                self.line.point_labels = []
+                self.drawingPolygon.emit(False)
+                self.setEditing(True)
+                self.editModeChanged.emit(True)  # Notify app.py
+                # Restore cursor when exiting creation mode
+                self._unhide_os_cursor()
+                self.restoreCursor()
                 self.repaint()
-            # Highlight selected point shapes during right-click context menu
-            for shape in self.selectedShapes:
-                if shape.shape_type == "point":
-                    shape.highlightVertex(0, shape.MOVE_VERTEX)
-            self._context_menu_active = True
-            self.repaint()
-            # Show context menu immediately on press
-            menu = self.menus[0]
-            menu.exec_(self.mapToGlobal(a0.pos()))
-            # Clean up after menu closes
-            self._context_menu_active = False
-            for shape in self.selectedShapes:
-                if shape.shape_type == "point":
-                    shape.highlightClear()
-            self.repaint()
+            elif self.editing():
+                group_mode = int(a0.modifiers()) == Qt.ControlModifier
+                if not self.selectedShapes or (
+                    self.hShape is not None and self.hShape not in self.selectedShapes
+                ):
+                    self.selectShapePoint(pos, multiple_selection_mode=group_mode)
+                    self.repaint()
+                # Highlight selected point shapes during right-click context menu
+                for shape in self.selectedShapes:
+                    if shape.shape_type == "point":
+                        shape.highlightVertex(0, shape.MOVE_VERTEX)
+                self._context_menu_active = True
+                self.repaint()
+                # Show context menu immediately on press
+                menu = self.menus[0]
+                menu.exec_(self.mapToGlobal(a0.pos()))
+                # Clean up after menu closes
+                self._context_menu_active = False
+                for shape in self.selectedShapes:
+                    if shape.shape_type == "point":
+                        shape.highlightClear()
+                self.repaint()
         elif a0.button() == Qt.MiddleButton and self._is_dragging_enabled:
             self.overrideCursor(CURSOR_GRAB)
             self._dragging_start_pos = pos
@@ -682,6 +798,8 @@ class Canvas(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, a0: QtGui.QMouseEvent) -> None:
         self._mouse_pressed = False
+        if self._cursor_debug:
+            self._log_cursor_state(f"mouseReleaseEvent:{a0.button()}:before")
 
         if a0.button() == Qt.LeftButton:
             if self.editing():
@@ -704,6 +822,22 @@ class Canvas(QtWidgets.QWidget):
                 self.shapeMoved.emit()
 
             self.movingShape = False
+        # End vertex dragging and restore cursor
+        if self._vertex_dragging:
+            self._vertex_dragging = False
+            # Restore all stacked cursors from drag
+            while QtWidgets.QApplication.overrideCursor() is not None:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            self._cursor = CURSOR_DEFAULT
+            self.unsetCursor()
+            self._clear_parent_viewport_cursor()
+            self._unhide_os_cursor()
+            self.repaint()
+            # After drag, if still over a vertex, show pointing hand immediately
+            if self.hVertex is not None:
+                self._force_point_cursor()
+        if self._cursor_debug:
+            self._log_cursor_state(f"mouseReleaseEvent:{a0.button()}:after")
         self._update_status()
 
     def endMove(self, copy):
@@ -760,21 +894,19 @@ class Canvas(QtWidgets.QWidget):
         """Select the first shape created which contains this point."""
         if self.hVertex is not None:
             assert self.hShape is not None
-            # For point shapes, select the shape and highlight the vertex
-            if self.hShape.shape_type == "point":
-                self.hShape.highlightVertex(i=self.hVertex, action=self.hShape.MOVE_VERTEX)
-                self.setHiding()
-                if self.hShape not in self.selectedShapes:
-                    if multiple_selection_mode:
-                        self.selectionChanged.emit(self.selectedShapes + [self.hShape])
-                    else:
-                        self.selectionChanged.emit([self.hShape])
-                    self.hShapeIsSelected = False
-                else:
-                    self.hShapeIsSelected = True
-                self.calculateOffsets(point)
-                return
             self.hShape.highlightVertex(i=self.hVertex, action=self.hShape.MOVE_VERTEX)
+            self.setHiding()
+            # Select the shape when clicking on its vertex
+            if self.hShape not in self.selectedShapes:
+                if multiple_selection_mode:
+                    self.selectionChanged.emit(self.selectedShapes + [self.hShape])
+                else:
+                    self.selectionChanged.emit([self.hShape])
+                self.hShapeIsSelected = False
+            else:
+                self.hShapeIsSelected = True
+            self.calculateOffsets(point)
+            return
         elif self.hEdgeMidpoint is not None:
             # For rectangle edge midpoint, keep the highlight
             assert self.hShape is not None
@@ -978,6 +1110,33 @@ class Canvas(QtWidgets.QWidget):
             for s in self.selectedShapesCopy:
                 s.paint(p)
 
+        # Draw crosshair when dragging vertex or creating polygon (grid-like alignment aid)
+        show_crosshair = (
+            (self._vertex_dragging and self.prevMovePoint is not None)
+            or (self.drawing() and self.current and self.prevMovePoint is not None)
+        )
+        if show_crosshair:
+            # Use shape color with 30% opacity (alpha = 255 * 0.7 = 179)
+            if self.hShape is not None:
+                color = QtGui.QColor(self.hShape.line_color)
+                color.setAlpha(179)  # 30% opacity
+            elif self.current is not None:
+                color = QtGui.QColor(self.current.line_color)
+                color.setAlpha(179)  # 30% opacity
+            else:
+                color = QtGui.QColor(128, 128, 128, 179)
+            pen = QtGui.QPen(color)
+            pen.setWidth(1)
+            p.setPen(pen)
+            # Short lines around vertex (30 pixels each side)
+            cx = int(self.prevMovePoint.x() * self.scale)
+            cy = int(self.prevMovePoint.y() * self.scale)
+            line_len = 30
+            # Horizontal line
+            p.drawLine(cx - line_len, cy, cx + line_len, cy)
+            # Vertical line
+            p.drawLine(cx, cy - line_len, cx, cy + line_len)
+
         # Draw hover label next to cursor
         # Hidden during: mouse button pressed (including vertex/edge dragging)
         if (
@@ -1042,8 +1201,8 @@ class Canvas(QtWidgets.QWidget):
         # Cursor position in scaled coordinates
         cx = self.prevMovePoint.x() * self.scale
         cy = self.prevMovePoint.y() * self.scale
-        offset_x = 20
-        offset_y = -20
+        offset_x = 30
+        offset_y = -40
 
         font = painter.font()
         font.setPointSize(max(8, int(10 * self.scale)))
@@ -1246,6 +1405,9 @@ class Canvas(QtWidgets.QWidget):
             if key == Qt.Key_Escape and self.current:
                 self.current = None
                 self.drawingPolygon.emit(False)
+                # Restore cursor when canceling creation
+                self._unhide_os_cursor()
+                self.restoreCursor()
                 self.update()
             elif (
                 key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Space)
@@ -1347,15 +1509,121 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def overrideCursor(self, cursor):
+        if self._cursor_debug:
+            self._log_cursor_state(f"overrideCursor:request={cursor}")
+        if self._vertex_dragging and cursor != self._blank_cursor:
+            return
         if cursor == self._cursor:
             return
         self.restoreCursor()
         self._cursor = cursor
         QtWidgets.QApplication.setOverrideCursor(cursor)
+        if self._cursor_debug:
+            self._log_cursor_state("overrideCursor:applied")
 
     def restoreCursor(self):
+        if self._cursor_debug:
+            self._log_cursor_state("restoreCursor:request")
+        if self._vertex_dragging:
+            return
+        self._unhide_os_cursor()
         self._cursor = CURSOR_DEFAULT
         QtWidgets.QApplication.restoreOverrideCursor()
+        self._clear_parent_viewport_cursor()
+        if self._cursor_debug:
+            self._log_cursor_state("restoreCursor:applied")
+
+    def _force_blank_cursor(self) -> None:
+        """Force blank cursor immediately (click-time) for drag/creation."""
+        if self._cursor_debug:
+            self._log_cursor_state("force_blank:before")
+        if not self._os_cursor_hidden:
+            if _QUARTZ_AVAILABLE:
+                try:
+                    Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+                except Exception:
+                    pass
+            if _CG_AVAILABLE and _CG is not None:
+                try:
+                    _CG.CGDisplayHideCursor(_CG.CGMainDisplayID())
+                except Exception:
+                    pass
+            if _NSCURSOR_AVAILABLE and not self._ns_cursor_hidden:
+                NSCursor.hide()
+                self._ns_cursor_hidden = True
+            self._os_cursor_hidden = True
+        if QtWidgets.QApplication.overrideCursor() is None:
+            QtWidgets.QApplication.setOverrideCursor(self._blank_cursor)
+        else:
+            QtWidgets.QApplication.changeOverrideCursor(self._blank_cursor)
+        # Also set widget cursor to avoid visual lag on some platforms
+        self.setCursor(self._blank_cursor)
+        self._set_parent_viewport_cursor(self._blank_cursor)
+        # Nudge cursor to force platform redraw
+        QtGui.QCursor.setPos(QtGui.QCursor.pos())
+        self._cursor = self._blank_cursor
+        if self._cursor_debug:
+            self._log_cursor_state("force_blank:after")
+
+    def _force_point_cursor(self) -> None:
+        """Force pointing-hand cursor immediately."""
+        self._unhide_os_cursor()
+        cursor = QtGui.QCursor(CURSOR_POINT)
+        if QtWidgets.QApplication.overrideCursor() is None:
+            QtWidgets.QApplication.setOverrideCursor(cursor)
+        else:
+            QtWidgets.QApplication.changeOverrideCursor(cursor)
+        self.setCursor(cursor)
+        self._set_parent_viewport_cursor(cursor)
+        self._cursor = CURSOR_POINT
+
+    def _unhide_os_cursor(self) -> None:
+        if self._os_cursor_hidden:
+            if _QUARTZ_AVAILABLE:
+                try:
+                    Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+                except Exception:
+                    pass
+            if _CG_AVAILABLE and _CG is not None:
+                try:
+                    _CG.CGDisplayShowCursor(_CG.CGMainDisplayID())
+                except Exception:
+                    pass
+            if _NSCURSOR_AVAILABLE and self._ns_cursor_hidden:
+                NSCursor.unhide()
+                self._ns_cursor_hidden = False
+            self._os_cursor_hidden = False
+
+    def _set_parent_viewport_cursor(self, cursor: QtGui.QCursor) -> None:
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QAbstractScrollArea):
+                parent.viewport().setCursor(cursor)
+                break
+            parent = parent.parent()
+
+    def _clear_parent_viewport_cursor(self) -> None:
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QAbstractScrollArea):
+                parent.viewport().unsetCursor()
+                break
+            parent = parent.parent()
+
+    def _log_cursor_state(self, tag: str) -> None:
+        try:
+            override = QtWidgets.QApplication.overrideCursor()
+            override_shape = override.shape() if override is not None else None
+        except Exception:
+            override_shape = None
+        cursor_shape = getattr(self, "_cursor", None)
+        logger.info(
+            "[cursor] {}: _cursor={!r} override={!r} dragging={!r}",
+            tag,
+            cursor_shape,
+            override_shape,
+            self._vertex_dragging,
+        )
 
     def resetState(self):
         self.restoreCursor()

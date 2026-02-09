@@ -45,7 +45,7 @@ class Shape:
     vertex_fill_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 255)
     select_line_color: QtGui.QColor = QtGui.QColor(255, 255, 255, 255)
     select_fill_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 64)
-    hvertex_fill_color: QtGui.QColor = QtGui.QColor(255, 255, 255, 255)
+    hvertex_fill_color: QtGui.QColor = QtGui.QColor(255, 255, 255, 128)
 
     point_type = P_ROUND
     point_size = 8
@@ -81,11 +81,12 @@ class Shape:
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
         self._highlightSettings = {
-            self.NEAR_VERTEX: (4, self.P_ROUND),
-            self.MOVE_VERTEX: (1.5, self.P_SQUARE),
+            self.NEAR_VERTEX: (8, self.P_ROUND),
+            self.MOVE_VERTEX: (3, self.P_SQUARE),
         }
         self._highlightEdgeMidpoint = None  # For rectangle edge midpoint highlighting
         self._is_creating = False  # True when shape is being created (for start vertex highlight)
+        self._is_line_preview = False  # True only for the preview line (self.line in canvas)
 
         self._closed = False
 
@@ -293,6 +294,9 @@ class Shape:
 
                 for i, p in enumerate(self.points):
                     line_path.lineTo(self._scale_point(p))
+                    # For preview line, skip drawing point 0 (it's already drawn in self.current)
+                    if self._is_line_preview and i == 0:
+                        continue
                     # Draw start vertex separately when creating (for white color)
                     if self._is_creating and i == 0:
                         self.drawVertex(start_vrtx_path, i)
@@ -304,11 +308,11 @@ class Shape:
             painter.drawPath(line_path)
             # Draw start vertex in white when creating
             if self._is_creating and start_vrtx_path.length() > 0:
-                painter.drawPath(start_vrtx_path)
                 painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
+                painter.drawPath(start_vrtx_path)
             if vrtx_path.length() > 0:
-                painter.drawPath(vrtx_path)
                 painter.fillPath(vrtx_path, self._current_vertex_fill_color)
+                painter.drawPath(vrtx_path)
             if self.fill and self.shape_type not in [
                 "line",
                 "linestrip",
@@ -320,31 +324,43 @@ class Shape:
 
             pen.setColor(QtGui.QColor(255, 0, 0, 255))
             painter.setPen(pen)
-            painter.drawPath(negative_vrtx_path)
             painter.fillPath(negative_vrtx_path, QtGui.QColor(255, 0, 0, 255))
+            painter.drawPath(negative_vrtx_path)
 
 
     def drawVertex(self, path, i):
         d = self.point_size
         shape = self.point_type
         point = self._scale_point(self.points[i])
-        # Point shapes use larger size (12) for better visibility
+        # Point shapes use larger size (18) for better visibility
         if self.shape_type == "point":
-            d = 12
-        if i == self._highlightIndex:
+            d = 18
+        elif i == self._highlightIndex:
+            # Apply highlight size multiplier only for non-point shapes
             size, shape = self._highlightSettings[self._highlightMode]
             d *= size  # type: ignore[assignment]
         # For point shapes: show as square when selected or highlighted
         if self.shape_type == "point" and (self.selected or i == self._highlightIndex):
             shape = self.P_SQUARE
-        # For point shapes, use semi-transparent vertex_fill_color
+        # For polygon creation preview line: show mouse position as square
+        # Use same size as vertex editing (MOVE_VERTEX: size multiplier 3)
+        # Only applies to self.line (preview line), not self.current (the polygon)
+        if self._is_line_preview and i == len(self.points) - 1 and i > 0:
+            size, shape = self._highlightSettings[self.MOVE_VERTEX]
+            d *= size
+        # For point shapes, use fill_color (with fill opacity) for inner color
+        # Line opacity is applied via line_color (pen) for the outline
         if self.shape_type == "point":
-            color = QtGui.QColor(self.vertex_fill_color)
-            color.setAlpha(self.fill_color.alpha())  # Use same alpha as fill
-            self._current_vertex_fill_color = color
+            if self.selected:
+                self._current_vertex_fill_color = self.select_fill_color
+            else:
+                self._current_vertex_fill_color = self.fill_color
         elif self._is_creating and i == 0:
             # Draw starting vertex in white during polygon creation
             self._current_vertex_fill_color = QtGui.QColor(255, 255, 255)
+        elif self._is_line_preview and i == len(self.points) - 1 and i > 0:
+            # Preview square: 70% transparent fill
+            self._current_vertex_fill_color = QtGui.QColor(255, 255, 255, 100)
         elif self._highlightIndex is not None:
             self._current_vertex_fill_color = self.hvertex_fill_color
         else:
@@ -398,14 +414,14 @@ class Shape:
         if highlighted:
             fill_color = self.hvertex_fill_color
             # Enlarge when highlighted (same as vertex highlight)
-            w *= 1.5
-            h *= 1.5
+            w *= 3
+            h *= 3
         else:
             fill_color = self.vertex_fill_color
         border_color = self.line_color  # Same as shape's line color
 
         painter.setBrush(fill_color)
-        painter.setPen(QtGui.QPen(border_color, 2))  # Thicker border like corner points
+        painter.setPen(QtGui.QPen(border_color, self.PEN_WIDTH))  # Use same line width as shape
 
         rect = QtCore.QRectF(
             scaled_point.x() - w / 2,
