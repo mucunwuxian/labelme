@@ -1116,17 +1116,20 @@ class Canvas(QtWidgets.QWidget):
                 shape.paint(p)
         if self.current:
             self.current.paint(p)
-            assert len(self.line.points) == len(self.line.point_labels)
-            self.line.paint(p)
+            # Don't paint preview line when near start point (hide cursor square)
+            if not self._near_start_point:
+                assert len(self.line.points) == len(self.line.point_labels)
+                self.line.paint(p)
         if self.selectedShapesCopy:
             for s in self.selectedShapesCopy:
                 s.paint(p)
 
         # Draw crosshair when dragging vertex or creating polygon (grid-like alignment aid)
+        # Hide crosshair when near start point (about to close polygon)
         show_crosshair = (
             (self._vertex_dragging and self.prevMovePoint is not None)
             or (self.drawing() and self.current and self.prevMovePoint is not None)
-        )
+        ) and not self._near_start_point
         if show_crosshair:
             # Use shape color with 30% opacity (alpha = 255 * 0.7 = 179)
             if self.hShape is not None:
