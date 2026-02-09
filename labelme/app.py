@@ -2136,26 +2136,26 @@ class MainWindow(QtWidgets.QMainWindow):
         view_w = self.scrollArea.viewport().width() / scale
         view_h = self.scrollArea.viewport().height() / scale
 
-        # Calculate target scroll position (center on clicked point)
+        # Calculate target top-left position in image coords (center on clicked point)
         target_x = x_ratio * img_w - view_w / 2
         target_y = y_ratio * img_h - view_h / 2
 
-        # Convert to scrollbar values
+        # Account for canvas centering offset
+        offset = self.canvas.offsetToCenter()
+
+        # Convert to scrollbar values (reverse of _updateNavigatorViewport calculation)
         h_bar = self.scrollBars[Qt.Horizontal]
         v_bar = self.scrollBars[Qt.Vertical]
 
-        max_scroll_x = max(0, img_w - view_w)
-        max_scroll_y = max(0, img_h - view_h)
+        h_value = (target_x + offset.x()) * scale
+        v_value = (target_y + offset.y()) * scale
 
-        if max_scroll_x > 0 and h_bar.maximum() > 0:
-            h_value = (target_x / max_scroll_x) * h_bar.maximum()
-            h_value = max(0, min(h_bar.maximum(), h_value))
-            self.setScroll(Qt.Horizontal, h_value)
+        # Clamp to valid range
+        h_value = max(0, min(h_bar.maximum(), h_value))
+        v_value = max(0, min(v_bar.maximum(), v_value))
 
-        if max_scroll_y > 0 and v_bar.maximum() > 0:
-            v_value = (target_y / max_scroll_y) * v_bar.maximum()
-            v_value = max(0, min(v_bar.maximum(), v_value))
-            self.setScroll(Qt.Vertical, v_value)
+        self.setScroll(Qt.Horizontal, h_value)
+        self.setScroll(Qt.Vertical, v_value)
 
     def _line_opacity_changed(self, value: int) -> None:
         """Update line opacity for all shapes."""
