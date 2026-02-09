@@ -423,6 +423,7 @@ class Canvas(QtWidgets.QWidget):
                 self._log_cursor_state("mouseMoveEvent:vertex_dragging")
             # Always force blank cursor while dragging a vertex
             self._force_blank_cursor()
+            self.prevMovePoint = pos  # Update for crosshair drawing
             self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
             self.repaint()
             self.movingShape = True
@@ -764,6 +765,7 @@ class Canvas(QtWidgets.QWidget):
                 # Start vertex dragging if a vertex is selected
                 if self.hVertex is not None:
                     self._vertex_dragging = True
+                    Shape.hide_vertex_outline = True  # Hide vertex outline during drag
                     self.prevMovePoint = pos  # Set immediately for crosshair
                     self._force_blank_cursor()
                 self.repaint()
@@ -837,6 +839,7 @@ class Canvas(QtWidgets.QWidget):
         # End vertex dragging and restore cursor
         if self._vertex_dragging:
             self._vertex_dragging = False
+            Shape.hide_vertex_outline = False  # Restore vertex outline
             # Restore all stacked cursors from drag
             while QtWidgets.QApplication.overrideCursor() is not None:
                 QtWidgets.QApplication.restoreOverrideCursor()
@@ -1131,21 +1134,36 @@ class Canvas(QtWidgets.QWidget):
             or (self.drawing() and self.current and self.prevMovePoint is not None)
         ) and not self._near_start_point
         if show_crosshair:
-            # Use shape color with 30% opacity (alpha = 255 * 0.7 = 179)
-            if self.hShape is not None:
-                color = QtGui.QColor(self.hShape.line_color)
-                color.setAlpha(179)  # 30% opacity
-            elif self.current is not None:
-                color = QtGui.QColor(self.current.line_color)
-                color.setAlpha(179)  # 30% opacity
-            else:
-                color = QtGui.QColor(128, 128, 128, 179)
-            pen = QtGui.QPen(color)
-            pen.setWidth(1)
-            p.setPen(pen)
-            # Short lines around vertex (30 pixels each side)
             cx = int(self.prevMovePoint.x() * self.scale)
             cy = int(self.prevMovePoint.y() * self.scale)
+
+            # Draw radial gradient circle (white, 2D Gaussian)
+            import math
+            p.save()
+            radius = 40
+            sigma = 14
+            max_alpha = 120
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq <= radius * radius:
+                        alpha = int(max_alpha * math.exp(-dist_sq / (2 * sigma * sigma)))
+                        p.setPen(QtGui.QColor(255, 255, 255, alpha))
+                        p.drawPoint(cx + dx, cy + dy)
+            p.restore()
+
+            # Draw crosshair lines
+            if self.hShape is not None:
+                base_color = QtGui.QColor(self.hShape.line_color)
+            elif self.current is not None:
+                base_color = QtGui.QColor(self.current.line_color)
+            else:
+                base_color = QtGui.QColor(128, 128, 128)
+            line_color = QtGui.QColor(base_color)
+            line_color.setAlpha(179)  # 30% opacity
+            pen = QtGui.QPen(line_color)
+            pen.setWidth(1)
+            p.setPen(pen)
             line_len = 30
             # Horizontal line
             p.drawLine(cx - line_len, cy, cx + line_len, cy)

@@ -39,6 +39,9 @@ class Shape:
     # Minimum rectangle size (in pixels) to show edge midpoints
     MIN_RECT_SIZE_FOR_EDGE_HANDLES = 20
 
+    # Flag to hide vertex outline during vertex dragging (set by canvas)
+    hide_vertex_outline = False
+
     # The following class variables influence the drawing of all shape objects.
     line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 102)  # 60% transparency
     fill_color: QtGui.QColor = QtGui.QColor(0, 0, 0, 51)  # 80% transparency
@@ -311,8 +314,10 @@ class Shape:
                 painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
                 painter.drawPath(start_vrtx_path)
             if vrtx_path.length() > 0:
-                painter.fillPath(vrtx_path, self._current_vertex_fill_color)
-                painter.drawPath(vrtx_path)
+                # Hide vertex fill and outline for preview line or during vertex dragging
+                if not self._is_line_preview and not Shape.hide_vertex_outline:
+                    painter.fillPath(vrtx_path, self._current_vertex_fill_color)
+                    painter.drawPath(vrtx_path)
             if self.fill and self.shape_type not in [
                 "line",
                 "linestrip",
