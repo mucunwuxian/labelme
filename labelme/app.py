@@ -314,6 +314,9 @@ class MainWindow(QtWidgets.QMainWindow):
             Qt.Horizontal: self.scrollArea.horizontalScrollBar(),
         }
         self.canvas.scrollRequest.connect(self.scrollRequest)
+        # Connect scrollbar value changes to navigator update
+        self.scrollBars[Qt.Vertical].valueChanged.connect(self._updateNavigatorViewport)
+        self.scrollBars[Qt.Horizontal].valueChanged.connect(self._updateNavigatorViewport)
 
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
@@ -3147,23 +3150,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setDirty()
 
     def deleteSelectedShape(self):
-        yes, no = QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No
-        msg = self.tr(
-            "You are about to permanently delete {} polygons, proceed anyway?"
-        ).format(len(self.canvas.selectedShapes))
-        if yes == QtWidgets.QMessageBox.warning(
-            self, self.tr("Attention"), msg, yes | no, yes
-        ):
-            self.remLabels(self.canvas.deleteSelected())
-            self.setDirty()
-            # Disable selection-dependent actions since nothing is selected now
-            self.actions.delete.setEnabled(False)
-            self.actions.duplicate.setEnabled(False)
-            self.actions.copy.setEnabled(False)
-            self.actions.edit.setEnabled(False)
-            if self.noShapes():
-                for action in self.on_shapes_present_actions:
-                    action.setEnabled(False)
+        self.remLabels(self.canvas.deleteSelected())
+        self.setDirty()
+        # Disable selection-dependent actions since nothing is selected now
+        self.actions.delete.setEnabled(False)
+        self.actions.duplicate.setEnabled(False)
+        self.actions.copy.setEnabled(False)
+        self.actions.edit.setEnabled(False)
+        if self.noShapes():
+            for action in self.on_shapes_present_actions:
+                action.setEnabled(False)
 
     def copyShape(self):
         self.canvas.endMove(copy=True)
