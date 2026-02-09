@@ -776,6 +776,8 @@ class Canvas(QtWidgets.QWidget):
                 self.line.points = []
                 self.line.point_labels = []
                 self.drawingPolygon.emit(False)
+                # Reset near-start-point flag
+                self._near_start_point = False
                 self.setEditing(True)
                 self.editModeChanged.emit(True)  # Notify app.py
                 # Restore cursor when exiting creation mode
@@ -1141,8 +1143,8 @@ class Canvas(QtWidgets.QWidget):
             import math
             p.save()
             radius = 40
-            sigma = 14
-            max_alpha = 120
+            sigma = 15
+            max_alpha = 100
             for dx in range(-radius, radius + 1):
                 for dy in range(-radius, radius + 1):
                     dist_sq = dx * dx + dy * dy
@@ -1160,7 +1162,7 @@ class Canvas(QtWidgets.QWidget):
             else:
                 base_color = QtGui.QColor(128, 128, 128)
             line_color = QtGui.QColor(base_color)
-            line_color.setAlpha(179)  # 30% opacity
+            line_color.setAlpha(128)  # 50% opacity
             pen = QtGui.QPen(line_color)
             pen.setWidth(1)
             p.setPen(pen)
@@ -1439,6 +1441,8 @@ class Canvas(QtWidgets.QWidget):
             if key == Qt.Key_Escape and self.current:
                 self.current = None
                 self.drawingPolygon.emit(False)
+                # Reset near-start-point flag
+                self._near_start_point = False
                 # Restore cursor when canceling creation
                 self._unhide_os_cursor()
                 self.restoreCursor()
