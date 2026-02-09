@@ -2,6 +2,19 @@
 <!DOCTYPE TS>
 <TS version="2.1" language="ja_JP">
 <context>
+    <name>LabelDialog</name>
+    <message>
+        <location filename="../widgets/label_dialog.py" line="0"/>
+        <source>Label</source>
+        <translation>ラベル</translation>
+    </message>
+    <message>
+        <location filename="../widgets/label_dialog.py" line="0"/>
+        <source>Label (guess)</source>
+        <translation>ラベル（推測）</translation>
+    </message>
+</context>
+<context>
     <name>AiAssistedAnnotationWidget</name>
     <message>
         <location filename="../widgets/_ai_assisted_annotation_widget.py" line="0"/>
@@ -752,6 +765,36 @@ Opacity</source>
         <location filename="../app.py" line="0"/>
         <source>Modify the label of the selected polygon</source>
         <translation>選択したポリゴンのラベルを変更</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change to Same Label</source>
+        <translation>同じラベルに変更</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change to '%s'</source>
+        <translation>ラベルを %s に変更（前回と同じ）</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change label to the last used label</source>
+        <translation>直前に使用したラベルに変更</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change to Guessed Label</source>
+        <translation>推測ラベルに変更</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change to '%s' (guess)</source>
+        <translation>ラベルを %s に変更（推測）</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
+        <source>Change label to the guessed label based on shape pattern</source>
+        <translation>シェイプパターンに基づく推測ラベルに変更</translation>
     </message>
     <message>
         <location filename="../app.py" line="0"/>

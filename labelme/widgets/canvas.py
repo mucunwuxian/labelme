@@ -185,8 +185,9 @@ class Canvas(QtWidgets.QWidget):
         self._hover_label_ready = False
         self._hover_label_timer = QtCore.QTimer(self)
         self._hover_label_timer.setSingleShot(True)
-        self._hover_label_timer.setInterval(500)
+        self._hover_label_timer.setInterval(1000)  # 1 second delay
         self._hover_label_timer.timeout.connect(self._onHoverLabelTimeout)
+        self._hover_label_last_pos = None  # Position when timer started
         self._mouse_pressed = False
 
         # Blank cursor for hiding during vertex/polygon operations
@@ -464,10 +465,17 @@ class Canvas(QtWidgets.QWidget):
                 # Attract line to starting point and
                 # colorise to alert the user.
                 pos = self.current[0]
-                self.overrideCursor(CURSOR_POINT)
                 self.current.highlightVertex(0, Shape.NEAR_VERTEX)
+                # Hide cursor when near start point
+                if not self._near_start_point:
+                    self._force_blank_cursor()
                 self._near_start_point = True
             else:
+                # Restore cursor when moving away from start point
+                if self._near_start_point:
+                    self._unhide_os_cursor()
+                    self.restoreCursor()
+                    self.overrideCursor(CURSOR_DRAW)
                 self._near_start_point = False
             if self.createMode in ["polygon", "linestrip"]:
                 self.line.points = [self.current[-1], pos]
@@ -602,13 +610,14 @@ class Canvas(QtWidgets.QWidget):
         else:  # Nothing found, clear highlights, reset state.
             self.restoreCursor()
             self.unHighlight()
-        # Update hover label state
-        if self.hShape != self._hover_label_shape:
-            self._hover_label_shape = self.hShape
-            self._hover_label_ready = False
-            self._hover_label_timer.stop()
-            if self.hShape is not None:
-                self._hover_label_timer.start()
+        # Update hover label state - reset on any cursor movement
+        self._hover_label_shape = self.hShape
+        self._hover_label_ready = False
+        self._hover_label_timer.stop()
+        if self.hShape is not None:
+            self._hover_label_last_pos = pos
+            self._hover_label_timer.start()
+        self.update()  # Repaint to hide label immediately
 
         self.vertexSelected.emit(self.hVertex is not None)
         self._update_status(extra_messages=status_messages)
@@ -639,6 +648,9 @@ class Canvas(QtWidgets.QWidget):
 
     def mousePressEvent(self, a0: QtGui.QMouseEvent) -> None:
         self._mouse_pressed = True
+        # Hide hover label on click
+        self._hover_label_ready = False
+        self._hover_label_timer.stop()
         if self._cursor_debug:
             self._log_cursor_state(f"mousePressEvent:{a0.button()}")
 
@@ -1195,17 +1207,18 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def _drawHoverLabel(self, painter, shape):
-        """Draw the shape's label next to the cursor."""
+        """Draw the shape's label next to the cursor (zoom-independent size)."""
         painter.save()
 
         # Cursor position in scaled coordinates
         cx = self.prevMovePoint.x() * self.scale
         cy = self.prevMovePoint.y() * self.scale
-        offset_x = 30
-        offset_y = -40
+        offset_x = 15
+        offset_y = -25
 
+        # Fixed font size (zoom-independent)
         font = painter.font()
-        font.setPointSize(max(8, int(10 * self.scale)))
+        font.setPointSize(10)
         painter.setFont(font)
 
         fm = QtGui.QFontMetrics(font)
@@ -1518,6 +1531,8 @@ class Canvas(QtWidgets.QWidget):
         self.restoreCursor()
         self._cursor = cursor
         QtWidgets.QApplication.setOverrideCursor(cursor)
+        # Also set widget cursor to match (in case _force_blank_cursor set it)
+        self.setCursor(cursor)
         if self._cursor_debug:
             self._log_cursor_state("overrideCursor:applied")
 
@@ -1530,6 +1545,8 @@ class Canvas(QtWidgets.QWidget):
         self._cursor = CURSOR_DEFAULT
         QtWidgets.QApplication.restoreOverrideCursor()
         self._clear_parent_viewport_cursor()
+        # Also unset canvas widget cursor (set by _force_blank_cursor)
+        self.unsetCursor()
         if self._cursor_debug:
             self._log_cursor_state("restoreCursor:applied")
 

@@ -170,6 +170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Shape.point_size = self._config["shape"]["point_size"]
 
         self._copied_shapes = []
+        self._last_label = None  # Last used label (for changeSame action)
 
         # Main widgets and related state.
         self.labelDialog = LabelDialog(
@@ -765,6 +766,15 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
 
+        changeSame = action(
+            self.tr("Change to Same Label"),
+            self._change_to_same_label,
+            None,
+            icon="tag.svg",
+            tip=self.tr("Change label to the last used label"),
+            enabled=False,
+        )
+
         fill_drawing = action(
             self.tr("Fill Drawing Polygon"),
             self.canvas.setFillDrawing,
@@ -830,6 +840,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             delete=delete,
             edit=edit,
+            changeSame=changeSame,
             duplicate=duplicate,
             copy=copy,
             paste=paste,
@@ -892,12 +903,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         # menu shown at right click
         self.context_menu_actions = (
-            *[draw_action for _, draw_action in self.draw_actions],
-            editMode,
+            changeSame,
             edit,
             duplicate,
-            copy,
-            paste,
             delete,
             undo,
             undoLastPoint,
@@ -1512,6 +1520,44 @@ class MainWindow(QtWidgets.QMainWindow):
                     return True
         return False
 
+    def _change_to_same_label(self):
+        """Change selected shapes' labels to the last used label."""
+        if self._last_label is None:
+            return
+
+        items = self.labelList.selectedItems()
+        if not items:
+            return
+
+        self.canvas.storeShapes()
+        for item in items:
+            shape = item.shape()
+            old_label = shape.label
+            shape.label = self._last_label
+            # Update label list item
+            item.setText(
+                shape.label
+                if shape.group_id is None
+                else f"{shape.label} ({shape.group_id})"
+            )
+            self._update_shape_color(shape)
+        self.setDirty()
+
+    def _update_change_same_action(self):
+        """Update changeSame action text and enabled state."""
+        if self._last_label:
+            self.actions.changeSame.setText(
+                self.tr("Change to '%s'") % self._last_label
+            )
+            # Enabled when there's a last label AND shapes are selected
+            n_selected = len(self.canvas.selectedShapes)
+            self.actions.changeSame.setEnabled(n_selected > 0)
+        else:
+            self.actions.changeSame.setText(
+                self.tr("Change to '%s'") % "---"
+            )
+            self.actions.changeSame.setEnabled(False)
+
     def _edit_label(self, value=None):
         items = self.labelList.selectedItems()
         if not items:
@@ -1601,6 +1647,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.add_label_item(
                     label=shape.label, color=self._get_rgb_by_label(label=shape.label)
                 )
+        # Update last used label for changeSame action
+        if edit_text and text:
+            self._last_label = text
+            self._update_change_same_action()
 
     def fileSearchChanged(self):
         self._import_images_from_dir(
@@ -1640,6 +1690,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(n_selected)
         self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected)
+        self._update_change_same_action()
 
     def addLabel(self, shape):
         if shape.group_id is None:
@@ -1987,6 +2038,7 @@ class MainWindow(QtWidgets.QMainWindow):
         text = None
         if items:
             text = items[0].data(Qt.UserRole)
+
         flags = {}
         group_id = None
         description = ""
@@ -2011,6 +2063,9 @@ class MainWindow(QtWidgets.QMainWindow):
             shape.description = description
             self.addLabel(shape)
             self.actions.editMode.setEnabled(True)
+            # Update last used label for changeSame action
+            self._last_label = text
+            self._update_change_same_action()
             self.actions.undoLastPoint.setEnabled(False)
             self.actions.undo.setEnabled(True)
             self.setDirty()

@@ -40,6 +40,12 @@ class LabelDialog(QtWidgets.QDialog):
         self._fit_to_content = fit_to_content
 
         super().__init__(parent)
+        # Prevent maximizing - only show close button
+        self.setWindowFlags(
+            self.windowFlags()
+            & ~QtCore.Qt.WindowMaximizeButtonHint
+            & ~QtCore.Qt.WindowMinimizeButtonHint
+        )
         self.edit = LabelQLineEdit()
         self.edit.setPlaceholderText(text)
         self.edit.setValidator(labelme.utils.labelValidator())

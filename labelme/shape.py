@@ -81,7 +81,7 @@ class Shape:
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
         self._highlightSettings = {
-            self.NEAR_VERTEX: (8, self.P_ROUND),
+            self.NEAR_VERTEX: (2, self.P_ROUND),  # Reduced from 8 to 2
             self.MOVE_VERTEX: (3, self.P_SQUARE),
         }
         self._highlightEdgeMidpoint = None  # For rectangle edge midpoint highlighting
