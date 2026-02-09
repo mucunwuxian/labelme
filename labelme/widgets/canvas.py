@@ -139,6 +139,8 @@ class Canvas(QtWidgets.QWidget):
 
         # State flags used by cursor handling during init/reset
         self._vertex_dragging = False  # True when dragging a vertex
+        self._edge_midpoint_dragging = False  # True when dragging an edge midpoint
+        self._dragging_edge_index = None  # Which edge is being dragged (EDGE_TOP, etc.)
         self._cursor_debug = os.environ.get("LABELME_CURSOR_DEBUG") == "1"
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
@@ -185,7 +187,7 @@ class Canvas(QtWidgets.QWidget):
         self._hover_label_ready = False
         self._hover_label_timer = QtCore.QTimer(self)
         self._hover_label_timer.setSingleShot(True)
-        self._hover_label_timer.setInterval(1000)  # 1 second delay
+        self._hover_label_timer.setInterval(500)  # 0.5 second delay
         self._hover_label_timer.timeout.connect(self._onHoverLabelTimeout)
         self._hover_label_last_pos = None  # Position when timer started
         self._mouse_pressed = False
@@ -517,6 +519,9 @@ class Canvas(QtWidgets.QWidget):
         if Qt.LeftButton & a0.buttons():
             if self.hEdgeMidpoint is not None and self.hShape is not None:
                 # Moving rectangle edge midpoint
+                if self._edge_midpoint_dragging:
+                    self._force_blank_cursor()
+                    self.prevMovePoint = pos  # Update for grid line drawing
                 self.boundedMoveEdge(pos)
                 self.repaint()
                 self.movingShape = True
@@ -768,6 +773,13 @@ class Canvas(QtWidgets.QWidget):
                     Shape.hide_vertex_outline = True  # Hide vertex outline during drag
                     self.prevMovePoint = pos  # Set immediately for crosshair
                     self._force_blank_cursor()
+                # Start edge midpoint dragging if an edge midpoint is selected
+                elif self.hEdgeMidpoint is not None:
+                    self._edge_midpoint_dragging = True
+                    self._dragging_edge_index = self.hEdgeMidpoint
+                    Shape.hide_edge_midpoint = True  # Hide edge midpoint during drag
+                    self.prevMovePoint = pos  # Set immediately for grid line
+                    self._force_blank_cursor()
                 self.repaint()
         elif a0.button() == Qt.RightButton:
             if self.drawing():
@@ -852,6 +864,22 @@ class Canvas(QtWidgets.QWidget):
             self.repaint()
             # After drag, if still over a vertex, show pointing hand immediately
             if self.hVertex is not None:
+                self._force_point_cursor()
+        # End edge midpoint dragging and restore cursor
+        if self._edge_midpoint_dragging:
+            self._edge_midpoint_dragging = False
+            self._dragging_edge_index = None
+            Shape.hide_edge_midpoint = False  # Restore edge midpoint
+            # Restore all stacked cursors from drag
+            while QtWidgets.QApplication.overrideCursor() is not None:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            self._cursor = CURSOR_DEFAULT
+            self.unsetCursor()
+            self._clear_parent_viewport_cursor()
+            self._unhide_os_cursor()
+            self.repaint()
+            # After drag, if still over an edge midpoint, show pointing hand
+            if self.hEdgeMidpoint is not None:
                 self._force_point_cursor()
         if self._cursor_debug:
             self._log_cursor_state(f"mouseReleaseEvent:{a0.button()}:after")
@@ -1008,13 +1036,8 @@ class Canvas(QtWidgets.QWidget):
         if self.outOfPixmap(pos):
             return
 
-        if self.prevPoint is None:
-            self.prevPoint = pos
-            return
-
-        dp = pos - self.prevPoint
-        self.hShape.moveEdgeBy(self.hEdgeMidpoint, dp)
-        self.prevPoint = pos
+        # Move edge to cursor position (like vertex dragging)
+        self.hShape.moveEdgeTo(self.hEdgeMidpoint, pos)
 
     def boundedMoveShapes(self, shapes, pos):
         if self.outOfPixmap(pos):
@@ -1172,6 +1195,39 @@ class Canvas(QtWidgets.QWidget):
             # Vertical line
             p.drawLine(cx, cy - line_len, cx, cy + line_len)
 
+        # Draw grid line when dragging edge midpoint
+        if self._edge_midpoint_dragging and self.hShape is not None and len(self.hShape.points) == 2:
+            # Get shape's line color with alpha 128
+            base_color = QtGui.QColor(self.hShape.line_color)
+            line_color = QtGui.QColor(base_color)
+            line_color.setAlpha(128)
+            pen = QtGui.QPen(line_color)
+            pen.setWidth(1)
+            p.setPen(pen)
+
+            # Get actual edge position from rectangle points
+            p0, p1 = self.hShape.points[0], self.hShape.points[1]
+
+            # EDGE_TOP=0, EDGE_BOTTOM=1 -> horizontal line at edge y
+            # EDGE_LEFT=2, EDGE_RIGHT=3 -> vertical line at edge x
+            # Note: painter still has offset transform, so just multiply by scale
+            if self._dragging_edge_index == Shape.EDGE_TOP:
+                edge_y = min(p0.y(), p1.y())
+                cy = int(edge_y * self.scale)
+                p.drawLine(0, cy, self.width(), cy)
+            elif self._dragging_edge_index == Shape.EDGE_BOTTOM:
+                edge_y = max(p0.y(), p1.y())
+                cy = int(edge_y * self.scale)
+                p.drawLine(0, cy, self.width(), cy)
+            elif self._dragging_edge_index == Shape.EDGE_LEFT:
+                edge_x = min(p0.x(), p1.x())
+                cx = int(edge_x * self.scale)
+                p.drawLine(cx, 0, cx, self.height())
+            elif self._dragging_edge_index == Shape.EDGE_RIGHT:
+                edge_x = max(p0.x(), p1.x())
+                cx = int(edge_x * self.scale)
+                p.drawLine(cx, 0, cx, self.height())
+
         # Draw hover label next to cursor
         # Hidden during: mouse button pressed (including vertex/edge dragging)
         if (
@@ -1236,17 +1292,17 @@ class Canvas(QtWidgets.QWidget):
         # Cursor position in scaled coordinates
         cx = self.prevMovePoint.x() * self.scale
         cy = self.prevMovePoint.y() * self.scale
-        offset_x = 15
-        offset_y = -25
+        offset_x = 20
+        offset_y = -40
 
         # Fixed font size (zoom-independent)
         font = painter.font()
-        font.setPointSize(10)
+        font.setPointSize(20)
         painter.setFont(font)
 
         fm = QtGui.QFontMetrics(font)
         text_rect = fm.boundingRect(shape.label)
-        padding = 4
+        padding = 8
 
         bg_rect = QtCore.QRectF(
             cx + offset_x,

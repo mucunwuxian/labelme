@@ -292,6 +292,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
         self.scrollArea.setWidgetResizable(True)
+        # Make scroll bars thicker and arrow buttons wider
+        self.scrollArea.setStyleSheet("""
+            QScrollBar:vertical {
+                width: 20px;
+            }
+            QScrollBar:horizontal {
+                height: 20px;
+            }
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-line:vertical {
+                height: 28px;
+            }
+            QScrollBar::sub-line:horizontal,
+            QScrollBar::add-line:horizontal {
+                width: 28px;
+            }
+        """)
         self.scrollBars = {
             Qt.Vertical: self.scrollArea.verticalScrollBar(),
             Qt.Horizontal: self.scrollArea.horizontalScrollBar(),

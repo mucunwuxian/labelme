@@ -42,6 +42,9 @@ class Shape:
     # Flag to hide vertex outline during vertex dragging (set by canvas)
     hide_vertex_outline = False
 
+    # Flag to hide edge midpoint during edge midpoint dragging (set by canvas)
+    hide_edge_midpoint = False
+
     # The following class variables influence the drawing of all shape objects.
     line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 102)  # 60% transparency
     fill_color: QtGui.QColor = QtGui.QColor(0, 0, 0, 51)  # 80% transparency
@@ -397,6 +400,9 @@ class Shape:
 
     def drawEdgeMidpoint(self, painter, point, is_horizontal, highlighted=False):
         """Draw a capsule-shaped handle at edge midpoint."""
+        # Hide edge midpoint during dragging
+        if Shape.hide_edge_midpoint:
+            return
         # Check if rectangle is large enough to show edge handles
         if len(self.points) != 2:
             return
@@ -418,9 +424,11 @@ class Shape:
 
         if highlighted:
             fill_color = self.hvertex_fill_color
-            # Enlarge when highlighted (same as vertex highlight)
-            w *= 3
-            h *= 3
+            # Enlarge when highlighted
+            if is_horizontal:
+                w, h = 36, 18
+            else:
+                w, h = 18, 36
         else:
             fill_color = self.vertex_fill_color
         border_color = self.line_color  # Same as shape's line color
@@ -594,6 +602,43 @@ class Shape:
                 self.points[0] = QtCore.QPointF(p0.x() + offset.x(), p0.y())
             else:
                 self.points[1] = QtCore.QPointF(p1.x() + offset.x(), p1.y())
+
+    def moveEdgeTo(self, edge_index, pos):
+        """Move a rectangle edge to an absolute position.
+
+        Args:
+            edge_index (int): The edge index (EDGE_TOP, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT)
+            pos (QPointF): The position to move the edge to
+        """
+        if self.shape_type != "rectangle" or len(self.points) != 2:
+            return
+
+        p0, p1 = self.points[0], self.points[1]
+
+        if edge_index == self.EDGE_TOP:
+            # Move top edge to pos.y()
+            if p0.y() < p1.y():
+                self.points[0] = QtCore.QPointF(p0.x(), pos.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x(), pos.y())
+        elif edge_index == self.EDGE_BOTTOM:
+            # Move bottom edge to pos.y()
+            if p0.y() > p1.y():
+                self.points[0] = QtCore.QPointF(p0.x(), pos.y())
+            else:
+                self.points[1] = QtCore.QPointF(p1.x(), pos.y())
+        elif edge_index == self.EDGE_LEFT:
+            # Move left edge to pos.x()
+            if p0.x() < p1.x():
+                self.points[0] = QtCore.QPointF(pos.x(), p0.y())
+            else:
+                self.points[1] = QtCore.QPointF(pos.x(), p1.y())
+        elif edge_index == self.EDGE_RIGHT:
+            # Move right edge to pos.x()
+            if p0.x() > p1.x():
+                self.points[0] = QtCore.QPointF(pos.x(), p0.y())
+            else:
+                self.points[1] = QtCore.QPointF(pos.x(), p1.y())
 
     def highlightVertex(self, i, action):
         """Highlight a vertex appropriately based on the current action
