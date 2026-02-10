@@ -175,7 +175,7 @@ pyinstaller labelme/labelme/__main__.py \
 This repo is the fork of [mpitid/pylabelme](https://github.com/mpitid/pylabelme).
 
 
-## Frankenstein Modification
+## Frankenstein Modification 🧟
 
 This fork includes the following features not available in the original labelme:
 
