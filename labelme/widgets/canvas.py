@@ -843,6 +843,7 @@ class Canvas(QtWidgets.QWidget):
                     Shape.hide_vertex_outline = True  # Hide vertex outline during drag
                     self.prevMovePoint = pos  # Set immediately for crosshair
                     self._force_blank_cursor()
+                    self._updateCursorOverlay()  # Show cursor overlay immediately
                 # Start edge midpoint dragging if an edge midpoint is selected
                 elif self.hEdgeMidpoint is not None:
                     self._edge_midpoint_dragging = True
@@ -850,6 +851,7 @@ class Canvas(QtWidgets.QWidget):
                     Shape.hide_edge_midpoint = True  # Hide edge midpoint during drag
                     self.prevMovePoint = pos  # Set immediately for grid line
                     self._force_blank_cursor()
+                    self._updateCursorOverlay()  # Show cursor overlay immediately
                 self.repaint()
         elif a0.button() == Qt.RightButton:
             if self.drawing():
