@@ -221,7 +221,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.uniqLabelList = UniqueLabelQListWidget()
         self.uniqLabelList.setColormap(LABEL_COLORMAP)
-        self._label_color_map: dict[str, int] = {}  # label -> color index
         self.uniqLabelList.setToolTip(
             self.tr("Select label to start annotating for it. Press 'Esc' to deselect.")
         )
@@ -3310,10 +3309,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             all_labels.add(shape["label"])
                 except Exception:
                     pass
-        # Reset and assign colors in sorted order
-        self._label_color_map = {}
-        for i, label in enumerate(sorted(all_labels)):
-            self._label_color_map[label] = i
+        # Add all labels to uniqLabelList in sorted order for consistent colors
+        for label in sorted(all_labels):
+            if self.uniqLabelList.find_label_item(label) is None:
+                self.uniqLabelList.add_label_item(
+                    label=label,
+                    color=self._get_rgb_by_label(label=label),
+                    sorted_insert=True,
+                )
         if pattern:
             try:
                 filenames = [f for f in filenames if re.search(pattern, f)]

@@ -944,6 +944,8 @@ class Canvas(QtWidgets.QWidget):
             self.unsetCursor()
             self._clear_parent_viewport_cursor()
             self._unhide_os_cursor()
+            # Hide cursor overlay after vertex drag
+            self._cursor_overlay.hideCursor()
             self.repaint()
             # After drag, if still over a vertex, show pointing hand immediately
             if self.hVertex is not None:
