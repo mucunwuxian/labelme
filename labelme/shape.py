@@ -319,8 +319,9 @@ class Shape:
                 painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
                 painter.drawPath(start_vrtx_path)
             if vrtx_path.length() > 0:
-                # Hide vertex fill and outline for preview line or during vertex dragging
-                if not self._is_line_preview and not Shape.hide_vertex_outline:
+                # Hide vertex only for selected shape during vertex dragging
+                # Non-selected shapes always show their vertices
+                if not self._is_line_preview and (not self.selected or not Shape.hide_vertex_outline):
                     painter.fillPath(vrtx_path, self._current_vertex_fill_color)
                     painter.drawPath(vrtx_path)
             if self.fill and self.shape_type not in [
@@ -342,16 +343,17 @@ class Shape:
         d = self.point_size
         shape = self.point_type
         point = self._scale_point(self.points[i])
-        # Point shapes use larger size (18) for better visibility
+        # Point shapes use larger size for better visibility
         if self.shape_type == "point":
-            d = 18
+            if self.selected or i == self._highlightIndex:
+                d = 36  # Larger square when selected/highlighted
+                shape = self.P_SQUARE
+            else:
+                d = 24  # Normal size
         elif i == self._highlightIndex:
             # Apply highlight size multiplier only for non-point shapes
             size, shape = self._highlightSettings[self._highlightMode]
             d *= size  # type: ignore[assignment]
-        # For point shapes: show as square when selected or highlighted
-        if self.shape_type == "point" and (self.selected or i == self._highlightIndex):
-            shape = self.P_SQUARE
         # For polygon creation preview line: show mouse position as square
         # Use same size as vertex editing (MOVE_VERTEX: size multiplier 3)
         # Only applies to self.line (preview line), not self.current (the polygon)
