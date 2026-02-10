@@ -6,7 +6,7 @@ from PyQt5 import QtWidgets
 class ZoomWidget(QtWidgets.QSpinBox):
     def __init__(self, value=100):
         super().__init__()
-        self.setRange(1, 1000)
+        self.setRange(1, 2000)
         self.setSuffix(" %")
         self.setSingleStep(5)  # 5% increments
         self.setValue(value)
