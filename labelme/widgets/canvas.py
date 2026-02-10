@@ -22,6 +22,7 @@ from labelme._automation import OsamSession
 from labelme._automation import polygon_from_mask
 from labelme.shape import Shape
 
+from .cursor_overlay import CursorOverlayWidget
 from .download import download_ai_model
 
 try:  # macOS cursor hide/unhide (PyObjC)
@@ -198,8 +199,66 @@ class Canvas(QtWidgets.QWidget):
         blank_pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         self._blank_cursor = QtGui.QCursor(blank_pixmap, 0, 0)
 
+        # Cursor overlay widget (separate layer for performance)
+        self._cursor_overlay = CursorOverlayWidget(self)
+        self._cursor_overlay.setGeometry(self.rect())
+        self._cursor_overlay.show()
+        self._cursor_overlay.raise_()
+
         # Scroll debounce
         self._last_scroll_time = 0.0
+
+    def _updateCursorOverlay(self):
+        """Update the cursor overlay widget based on current state."""
+        if self.prevMovePoint is None or self.outOfPixmap(self.prevMovePoint):
+            self._cursor_overlay.hideCursor()
+            # Show arrow cursor in margin area (outside image but inside canvas)
+            self.overrideCursor(CURSOR_DEFAULT)
+            return
+
+        # Determine if crosshair should show
+        show_crosshair = (
+            (self._vertex_dragging and self.prevMovePoint is not None)
+            or (self.drawing() and self.current and self.prevMovePoint is not None)
+            or (self.createMode in ["point", "polygon", "rectangle"] and self.drawing() and self.prevMovePoint is not None)
+        ) and not self._near_start_point
+
+        # Determine crosshair color
+        if self.hShape is not None:
+            crosshair_color = QtGui.QColor(self.hShape.line_color)
+        elif self.current is not None:
+            crosshair_color = QtGui.QColor(self.current.line_color)
+        elif self.createMode in ["point", "polygon", "rectangle"]:
+            crosshair_color = QtGui.QColor(Shape.line_color)
+        else:
+            crosshair_color = QtGui.QColor(128, 128, 128)
+
+        # Determine if point circle should show
+        show_point_circle = False
+        point_circle_color = None
+        point_circle_pos = self.prevMovePoint
+
+        if self._vertex_dragging and self.hShape is not None and self.hShape.shape_type == "point":
+            show_point_circle = True
+            point_circle_color = QtGui.QColor(self.hShape.line_color)
+            point_circle_pos = self.hShape.points[0]
+        elif self.createMode == "point" and self.drawing():
+            show_point_circle = True
+            point_circle_color = QtGui.QColor(Shape.line_color)
+
+        # Convert image coordinates to widget coordinates for overlay
+        image_pos = point_circle_pos if show_point_circle else self.prevMovePoint
+        offset = self.offsetToCenter() if self.pixmap else QPointF(0, 0)
+        widget_pos = QPointF(
+            (image_pos.x() + offset.x()) * self.scale,
+            (image_pos.y() + offset.y()) * self.scale
+        )
+        self._cursor_overlay.setCursorPos(widget_pos)
+        self._cursor_overlay.setShowCrosshair(show_crosshair)
+        self._cursor_overlay.setShowPointCircle(show_point_circle)
+        self._cursor_overlay.setCrosshairColor(crosshair_color)
+        if point_circle_color:
+            self._cursor_overlay.setPointCircleColor(point_circle_color)
 
     def fillDrawing(self):
         return self._fill_drawing
@@ -302,6 +361,7 @@ class Canvas(QtWidgets.QWidget):
             self._log_cursor_state("leaveEvent:before")
         self.unHighlight()
         self.restoreCursor()
+        self._cursor_overlay.hideCursor()
         if self._cursor_debug:
             self._log_cursor_state("leaveEvent:after")
         self._update_status()
@@ -427,6 +487,7 @@ class Canvas(QtWidgets.QWidget):
             self._force_blank_cursor()
             self.prevMovePoint = pos  # Update for crosshair drawing
             self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
+            self._updateCursorOverlay()
             self.repaint()
             self.movingShape = True
             return
@@ -445,13 +506,13 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self.line.shape_type = self.createMode
 
-            if self.current:
-                # Hide cursor when drawing polygon (show crosshair instead)
+            if self.current or self.createMode in ["point", "polygon", "rectangle"]:
+                # Hide cursor when drawing (show crosshair instead)
                 self.overrideCursor(self._blank_cursor)
             else:
                 self.overrideCursor(CURSOR_DRAW)
             if not self.current:
-                self.repaint()  # draw crosshair
+                self._updateCursorOverlay()  # Update cursor overlay (no repaint needed)
                 self._update_status()
                 return
 
@@ -510,6 +571,7 @@ class Canvas(QtWidgets.QWidget):
                 self.line.point_labels = [1]
                 self.line.close()
             assert len(self.line.points) == len(self.line.point_labels)
+            self._updateCursorOverlay()
             self.repaint()
             self.current.highlightClear()
             self._update_status()
@@ -614,8 +676,14 @@ class Canvas(QtWidgets.QWidget):
                 self.update()
                 break
         else:  # Nothing found, clear highlights, reset state.
-            self.restoreCursor()
             self.unHighlight()
+            # Restore to default cursor if not already default
+            if self._cursor != CURSOR_DEFAULT:
+                self._unhide_os_cursor()
+                self._cursor = CURSOR_DEFAULT
+                if QtWidgets.QApplication.overrideCursor() is not None:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                self.setCursor(CURSOR_DEFAULT)
         # Update hover label state - reset on any cursor movement
         self._hover_label_shape = self.hShape
         self._hover_label_ready = False
@@ -635,6 +703,7 @@ class Canvas(QtWidgets.QWidget):
         if shape is None or index is None or point is None:
             return
         shape.insertPoint(index, point)
+        shape.touch()  # Update modification timestamp
         shape.highlightVertex(index, shape.MOVE_VERTEX)
         self.hShape = shape
         self.hVertex = index
@@ -647,6 +716,7 @@ class Canvas(QtWidgets.QWidget):
         if shape is None or index is None:
             return
         shape.removePoint(index)
+        shape.touch()  # Update modification timestamp
         shape.highlightClear()
         self.hShape = shape
         self.prevhVertex = None
@@ -793,9 +863,19 @@ class Canvas(QtWidgets.QWidget):
                 self.setEditing(True)
                 self.editModeChanged.emit(True)  # Notify app.py
                 # Restore cursor when exiting creation mode
+                # Force show OS cursor regardless of flag
+                self._os_cursor_hidden = True  # Ensure _unhide_os_cursor works
                 self._unhide_os_cursor()
-                self.restoreCursor()
+                # Clear all override cursors
+                while QtWidgets.QApplication.overrideCursor() is not None:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                self._cursor = CURSOR_DEFAULT
+                self._clear_parent_viewport_cursor()
+                # Hide cursor overlay
+                self._cursor_overlay.hideCursor()
                 self.repaint()
+                # Delay cursor restore to ensure it takes effect
+                QtCore.QTimer.singleShot(50, lambda: self.setCursor(CURSOR_DEFAULT))
             elif self.editing():
                 group_mode = int(a0.modifiers()) == Qt.ControlModifier
                 if not self.selectedShapes or (
@@ -846,12 +926,15 @@ class Canvas(QtWidgets.QWidget):
         if self.movingShape and self.hShape:
             index = self.shapes.index(self.hShape)
             if self.shapesBackups[-1][index].points != self.shapes[index].points:
+                self.hShape.touch()  # Update modification timestamp
                 self.storeShapes()
                 self.shapeMoved.emit()
 
             self.movingShape = False
         # End vertex dragging and restore cursor
         if self._vertex_dragging:
+            if self.hShape:
+                self.hShape.touch()  # Update modification timestamp
             self._vertex_dragging = False
             Shape.hide_vertex_outline = False  # Restore vertex outline
             # Restore all stacked cursors from drag
@@ -867,6 +950,8 @@ class Canvas(QtWidgets.QWidget):
                 self._force_point_cursor()
         # End edge midpoint dragging and restore cursor
         if self._edge_midpoint_dragging:
+            if self.hShape:
+                self.hShape.touch()  # Update modification timestamp
             self._edge_midpoint_dragging = False
             self._dragging_edge_index = None
             Shape.hide_edge_midpoint = False  # Restore edge midpoint
@@ -1090,6 +1175,11 @@ class Canvas(QtWidgets.QWidget):
         self.storeShapes()
         self.update()
 
+    def resizeEvent(self, event):
+        """Handle resize events - resize cursor overlay."""
+        super().resizeEvent(event)
+        self._cursor_overlay.setGeometry(self.rect())
+
     def paintEvent(self, a0: QtGui.QPaintEvent) -> None:
         if not self.pixmap:
             return super().paintEvent(a0)
@@ -1107,14 +1197,15 @@ class Canvas(QtWidgets.QWidget):
 
         p.scale(1 / self.scale, 1 / self.scale)
 
-        # draw crosshair
+        # draw crosshair (not for point/polygon - they have custom crosshair only)
         if (
             self._crosshair[self._createMode]
             and self.drawing()
             and self.prevMovePoint is not None
             and not self.outOfPixmap(self.prevMovePoint)
+            and self.createMode not in ["point", "polygon"]
         ):
-            p.setPen(QtGui.QColor(0, 0, 0))
+            p.setPen(QtGui.QColor(0, 0, 0, 128))
             p.drawLine(
                 0,
                 int(self.prevMovePoint.y() * self.scale),
@@ -1151,49 +1242,6 @@ class Canvas(QtWidgets.QWidget):
         if self.selectedShapesCopy:
             for s in self.selectedShapesCopy:
                 s.paint(p)
-
-        # Draw crosshair when dragging vertex or creating polygon (grid-like alignment aid)
-        # Hide crosshair when near start point (about to close polygon)
-        show_crosshair = (
-            (self._vertex_dragging and self.prevMovePoint is not None)
-            or (self.drawing() and self.current and self.prevMovePoint is not None)
-        ) and not self._near_start_point
-        if show_crosshair:
-            cx = int(self.prevMovePoint.x() * self.scale)
-            cy = int(self.prevMovePoint.y() * self.scale)
-
-            # Draw radial gradient circle (white, 2D Gaussian)
-            import math
-            p.save()
-            radius = 40
-            sigma = 15
-            max_alpha = 100
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    dist_sq = dx * dx + dy * dy
-                    if dist_sq <= radius * radius:
-                        alpha = int(max_alpha * math.exp(-dist_sq / (2 * sigma * sigma)))
-                        p.setPen(QtGui.QColor(255, 255, 255, alpha))
-                        p.drawPoint(cx + dx, cy + dy)
-            p.restore()
-
-            # Draw crosshair lines
-            if self.hShape is not None:
-                base_color = QtGui.QColor(self.hShape.line_color)
-            elif self.current is not None:
-                base_color = QtGui.QColor(self.current.line_color)
-            else:
-                base_color = QtGui.QColor(128, 128, 128)
-            line_color = QtGui.QColor(base_color)
-            line_color.setAlpha(128)  # 50% opacity
-            pen = QtGui.QPen(line_color)
-            pen.setWidth(1)
-            p.setPen(pen)
-            line_len = 30
-            # Horizontal line
-            p.drawLine(cx - line_len, cy, cx + line_len, cy)
-            # Vertical line
-            p.drawLine(cx, cy - line_len, cx, cy + line_len)
 
         # Draw grid line when dragging edge midpoint
         if self._edge_midpoint_dragging and self.hShape is not None and len(self.hShape.points) == 2:

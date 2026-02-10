@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime
 
 import numpy as np
 import skimage.measure
@@ -83,6 +84,7 @@ class Shape:
         self.description = description
         self.other_data = {}
         self.mask = mask
+        self.modified_at = datetime.now().isoformat()
 
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
@@ -559,6 +561,10 @@ class Shape:
 
     def boundingRect(self):
         return self.makePath().boundingRect()
+
+    def touch(self):
+        """Update the modification timestamp."""
+        self.modified_at = datetime.now().isoformat()
 
     def moveBy(self, offset):
         self.points = [p + offset for p in self.points]

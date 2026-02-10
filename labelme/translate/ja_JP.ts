@@ -327,6 +327,11 @@
     </message>
     <message>
         <location filename="../app.py" line="0"/>
+        <source>Update Distribution</source>
+        <translation>更新分布</translation>
+    </message>
+    <message>
+        <location filename="../app.py" line="0"/>
         <source>Progress
 &amp;Stats</source>
         <translation>進捗

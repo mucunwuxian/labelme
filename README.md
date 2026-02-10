@@ -181,13 +181,14 @@ This fork includes the following features not available in the original labelme:
 
 ### Navigation & View
 - **Navigator Widget (Minimap)**: Shows the full image with current viewport indicator, click to jump to any position
+- **Update Distribution Widget**: Highlights shapes without modification timestamps in semi-transparent red, helping identify areas that need review
 - **Max Zoom 2000%**: Extended zoom range from 1000% to 2000%
 - **Thicker Scrollbars**: Improved visibility with 20px scrollbar width
 
 ### Editing Enhancements
 - **Rectangle Edge Handles**: Capsule-shaped handles on rectangle edges for easy resizing by dragging
 - **Grid Lines on Edge Drag**: Horizontal/vertical guide lines appear when dragging rectangle edges
-- **Crosshair with Gaussian Gradient**: Visual cursor aid during polygon creation and vertex editing
+- **Custom Cursor Overlay**: Crosshair with Gaussian gradient for polygon/rectangle/point creation and vertex editing (separate layer for performance)
 - **Polygon Close Preview**: Visual feedback when approaching start point to close polygon
 - **Instant Edge/Vertex Movement**: Edges and vertices move immediately to cursor position on click
 - **No Delete Confirmation**: Polygon deletion works instantly without confirmation dialog (undo supported)

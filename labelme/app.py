@@ -49,6 +49,7 @@ from labelme.widgets import LabelListWidget
 from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import NavigatorWidget
 from labelme.widgets import StatusStats
+from labelme.widgets import UpdateDistributionWidget
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
@@ -194,6 +195,12 @@ class MainWindow(QtWidgets.QMainWindow):
             | QtWidgets.QDockWidget.DockWidgetMovable
         )
         self.navigator_dock.setFeatures(nav_features)
+
+        # Update Distribution (heatmap of recent modifications)
+        self.update_distribution, self.update_distribution_dock = (
+            self._create_update_distribution_dock()
+        )
+        self.update_distribution_dock.setFeatures(nav_features)
 
         self.flag_dock = self.flag_widget = None
         self.flag_dock = QtWidgets.QDockWidget(self.tr("Flags"), self)
@@ -343,6 +350,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dockOptions() | QtWidgets.QMainWindow.AllowNestedDocks
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self.navigator_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.update_distribution_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.flag_dock, Qt.Vertical)
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock, Qt.Vertical)
         self.addDockWidget(Qt.RightDockWidgetArea, self.shape_dock, Qt.Vertical)
@@ -892,8 +900,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_actions: list[tuple[str, QtWidgets.QAction]] = [
             ("polygon", createMode),
             ("rectangle", createRectangleMode),
-            ("circle", createCircleMode),
             ("point", createPointMode),
+            ("circle", createCircleMode),
             ("line", createLineMode),
             ("linestrip", createLineStripMode),
             ("ai_polygon", createAiPolygonMode),
@@ -1205,6 +1213,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _ensure_right_dock_splits(self) -> None:
         dock_order = [
             self.navigator_dock,
+            self.update_distribution_dock,
             self.flag_dock,
             self.label_dock,
             self.shape_dock,
@@ -1219,6 +1228,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.navigator.deleteLater()
             self.navigator, self.navigator_dock = self._create_navigator_dock()
             dock_order[0] = self.navigator_dock
+            if self.update_distribution_dock is not None:
+                self.update_distribution_dock.deleteLater()
+            if self.update_distribution is not None:
+                self.update_distribution.deleteLater()
+            self.update_distribution, self.update_distribution_dock = (
+                self._create_update_distribution_dock()
+            )
+            dock_order[1] = self.update_distribution_dock
         visible_docks = [dock for dock in dock_order if dock.isVisible()]
         if len(visible_docks) < 2:
             visible_docks = dock_order
@@ -1228,12 +1245,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resizeDocks(
             [
                 self.navigator_dock,
+                self.update_distribution_dock,
                 self.flag_dock,
                 self.label_dock,
                 self.shape_dock,
                 self.file_dock,
             ],
-            [220, 160, 160, 200, 220],
+            [180, 180, 140, 140, 180, 180],
             Qt.Vertical,
         )
 
@@ -1260,6 +1278,24 @@ class MainWindow(QtWidgets.QMainWindow):
         navigator_dock.setWidget(scroll_area)
         navigator.viewportChangeRequested.connect(self._onNavigatorViewportChange)
         return navigator, navigator_dock
+
+    def _create_update_distribution_dock(
+        self,
+    ) -> tuple[UpdateDistributionWidget, QtWidgets.QDockWidget]:
+        update_dist = UpdateDistributionWidget()
+        update_dist_dock = QtWidgets.QDockWidget(self.tr("Update Distribution"), self)
+        update_dist_dock.setObjectName("UpdateDistribution")
+        update_dist_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        # Wrap in QScrollArea to allow dock resizing on macOS
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidget(update_dist)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        update_dist_dock.setWidget(scroll_area)
+        update_dist.viewportChangeRequested.connect(self._onNavigatorViewportChange)
+        return update_dist, update_dist_dock
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -1330,6 +1366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.save.setEnabled(True)
         self.setWindowTitle(self._get_window_title(dirty=True))
         self.navigator.setShapes(self.canvas.shapes)
+        self.update_distribution.setShapes(self.canvas.shapes)
 
     def setClean(self):
         self._is_changed = False
@@ -1877,6 +1914,14 @@ class MainWindow(QtWidgets.QMainWindow):
             shape.flags = default_flags
             shape.flags.update(shape_dict["flags"])
             shape.other_data = shape_dict["other_data"]
+            # Restore modified_at (check both direct field and other_data)
+            # If not present, leave as None (will show red overlay in update distribution)
+            if "modified_at" in shape_dict:
+                shape.modified_at = shape_dict["modified_at"]
+            elif "modified_at" in shape_dict["other_data"]:
+                shape.modified_at = shape_dict["other_data"]["modified_at"]
+            else:
+                shape.modified_at = None
 
             shapes.append(shape)
         self._load_shapes(shapes=shapes)
@@ -1907,6 +1952,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     mask=None
                     if s.mask is None
                     else utils.img_arr_to_b64(s.mask.astype(np.uint8)),
+                    modified_at=s.modified_at,
                 )
             )
             return data
@@ -2198,6 +2244,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.navigator.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
         self.navigator.setShapes(self.canvas.shapes)
+        self.update_distribution.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
+        self.update_distribution.setShapes(self.canvas.shapes)
 
     def _onNavigatorViewportChange(self, x_ratio: float, y_ratio: float):
         """Handle click on navigator to move viewport center."""
@@ -2422,6 +2470,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pixmap = QtGui.QPixmap.fromImage(image)
         self.canvas.loadPixmap(pixmap)
         self.navigator.setPixmap(pixmap)
+        self.update_distribution.setPixmap(pixmap)
         flags = {k: False for k in self._config["flags"] or []}
         if self.labelFile:
             self._load_shape_dicts(shape_dicts=self.labelFile.shapes)
