@@ -113,6 +113,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # Light blue background for annotated files
     FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, 30)  # rgba with low alpha
+    # Red background for shapes without modification timestamp
+    SHAPE_UNMODIFIED_COLOR = QtGui.QColor(229, 57, 53, 30)  # rgba with low alpha (matching file list style)
 
     filename: str | None
     _text_osam_session: OsamSession | None = None
@@ -1366,6 +1368,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(self._get_window_title(dirty=True))
         self.navigator.setShapes(self.canvas.shapes)
         self.update_distribution.setShapes(self.canvas.shapes)
+        self._updateLabelListBackgrounds()
+
+    def _updateLabelListBackgrounds(self):
+        """Update label list item backgrounds based on shape modification status."""
+        for row in range(self.labelList._model.rowCount()):
+            item = self.labelList._model.item(row)
+            if item:
+                shape = item.shape()
+                if shape and getattr(shape, 'modified_at', None):
+                    item.setBackground(QtGui.QBrush())  # Clear background
+                elif shape:
+                    item.setBackground(self.SHAPE_UNMODIFIED_COLOR)
 
     def setClean(self):
         self._is_changed = False
@@ -1762,6 +1776,10 @@ class MainWindow(QtWidgets.QMainWindow):
             x, y = 0, 0
 
         label_list_item = LabelListWidgetItem(text, shape)
+
+        # Highlight shapes without modification timestamp
+        if not getattr(shape, 'modified_at', None):
+            label_list_item.setBackground(self.SHAPE_UNMODIFIED_COLOR)
 
         # Insert in sorted order (key1: y, key2: x)
         insert_row = 0

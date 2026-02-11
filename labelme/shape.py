@@ -496,6 +496,10 @@ class Shape:
     def nearestVertex(self, point, epsilon):
         min_distance = float("inf")
         min_i = None
+        # For point shapes, use visual size for hit detection
+        if self.shape_type == "point":
+            visual_size = 36 if self.selected else 24
+            epsilon = max(epsilon, visual_size / 2)
         point = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
         for i, p in enumerate(self.points):
             p = QtCore.QPointF(p.x() * self.scale, p.y() * self.scale)
@@ -526,10 +530,11 @@ class Shape:
             return False
         if self.shape_type == "point":
             # For point shapes, check if the click is within the point's visual radius
-            # Use point_size * 2 to make it easier to click on points
+            # Use actual display size: 36 when selected, 24 otherwise
             if self.points:
                 dist = labelme.utils.distance(self.points[0] - point)
-                return dist <= self.point_size * 2 / self.scale
+                visual_size = 36 if self.selected else 24
+                return dist <= visual_size / 2 / self.scale
             return False
         if self.mask is not None:
             y = np.clip(

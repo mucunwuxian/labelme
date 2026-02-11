@@ -183,7 +183,7 @@
     <message>
         <location filename="../app.py" line="0"/>
         <source>Polygon Labels</source>
-        <translation>ポリゴンラベル</translation>
+        <translation>ポリゴンラベル一覧</translation>
     </message>
     <message>
         <location filename="../app.py" line="0"/>

@@ -1042,9 +1042,19 @@ class Canvas(QtWidgets.QWidget):
             self.calculateOffsets(point)
             return
         elif self.hEdgeMidpoint is not None:
-            # For rectangle edge midpoint, keep the highlight
+            # For rectangle edge midpoint, select the shape (deselect others)
             assert self.hShape is not None
             self.hShape.highlightEdgeMidpoint(self.hEdgeMidpoint)
+            self.setHiding()
+            if self.hShape not in self.selectedShapes:
+                if multiple_selection_mode:
+                    self.selectionChanged.emit(self.selectedShapes + [self.hShape])
+                else:
+                    self.selectionChanged.emit([self.hShape])
+                self.hShapeIsSelected = False
+            else:
+                self.hShapeIsSelected = True
+            self.calculateOffsets(point)
             return
         else:
             shape: Shape

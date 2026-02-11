@@ -112,18 +112,20 @@ class UpdateDistributionWidget(QtWidgets.QWidget):
             scale_x = w / self._img_size[0]
             scale_y = h / self._img_size[1]
             min_radius_img = 25  # Minimum radius in image coordinates (50x50 circle)
-            expand_img = 20  # Expansion in image coordinates
+            expand_img = 30  # Expansion in image coordinates
 
             for shape in self._shapes:
                 if not shape.points:
                     continue
 
                 alpha = self._get_shape_alpha(shape)
-                # Use red to highlight old shapes (higher alpha = more visible)
-                fill_color = QtGui.QColor(255, 0, 0, alpha)
+                # Use shape's assigned color for overlay
+                shape_color = shape.line_color if shape.line_color else QtGui.QColor(255, 0, 0)
+                fill_color = QtGui.QColor(shape_color.red(), shape_color.green(), shape_color.blue(), alpha)
                 painter.setBrush(fill_color)
-                # Red border with alpha 176
-                border_pen = QtGui.QPen(QtGui.QColor(255, 0, 0, 176))
+                # Border with shape color and alpha 176
+                border_color = QtGui.QColor(shape_color.red(), shape_color.green(), shape_color.blue(), 176)
+                border_pen = QtGui.QPen(border_color)
                 border_pen.setWidthF(0.5)
                 painter.setPen(border_pen)
 
