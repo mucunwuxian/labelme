@@ -117,6 +117,8 @@ class MainWindow(QtWidgets.QMainWindow):
     FILE_NEWLY_SAVED_COLOR = QtGui.QColor(30, 136, 229, 40)  # rgba with higher alpha
     # Red background for shapes without modification timestamp
     SHAPE_UNMODIFIED_COLOR = QtGui.QColor(229, 57, 53, 20)  # rgba with low alpha (matching file list style)
+    # Predefined zoom levels (in percent)
+    ZOOM_LEVELS = (25, 33, 50, 67, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1150, 1300, 1450, 1600, 1800, 2000)
 
     filename: str | None
     _text_osam_session: OsamSession | None = None
@@ -2219,11 +2221,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_zoom(value=100)
 
     def _add_zoom(self, increment: float, pos: QtCore.QPointF | None = None) -> None:
-        zoom_value: int
+        """Zoom to the next/previous predefined zoom level."""
+        current = self.zoomWidget.value()
         if increment > 1:
-            zoom_value = math.ceil(self.zoomWidget.value() * increment)
+            # Zoom in: find the next larger level
+            for level in self.ZOOM_LEVELS:
+                if level > current:
+                    zoom_value = level
+                    break
+            else:
+                zoom_value = self.ZOOM_LEVELS[-1]  # Max level
         else:
-            zoom_value = math.floor(self.zoomWidget.value() * increment)
+            # Zoom out: find the next smaller level
+            for level in reversed(self.ZOOM_LEVELS):
+                if level < current:
+                    zoom_value = level
+                    break
+            else:
+                zoom_value = self.ZOOM_LEVELS[0]  # Min level
         self._zoom_mode = _ZoomMode.MANUAL_ZOOM
         self._set_zoom(value=zoom_value, pos=pos)
 
