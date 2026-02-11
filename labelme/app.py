@@ -127,6 +127,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _brightness_contrast_values: dict[str, tuple[int | None, int | None]]
     _prev_opened_dir: str | None
     _initially_annotated_files: set[str]  # Files already annotated when dir was opened
+    _current_file_row: int  # Row index of the currently loaded file in the file list
     _other_data: dict | None
 
     # NB: this tells Mypy etc. that `actions` here
@@ -193,6 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.setStyleSheet("QListView::item { min-height: 24px; padding: 2px 0px; }")
         self._prev_opened_dir = None
         self._initially_annotated_files: set[str] = set()
+        self._current_file_row: int = -1
 
         # Navigator (minimap)
         self.navigator, self.navigator_dock = self._create_navigator_dock()
@@ -2009,10 +2011,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 flags=flags,
             )
             self.labelFile = lf
-            # Find and update the current file's list item
-            item = self.fileListWidget.currentItem()
-            if item:
-                self._setFileItemAnnotated(item, True, saved_in_session=True)
+            # Update the file list item using stored row index
+            if self._current_file_row >= 0:
+                item = self.fileListWidget.item(self._current_file_row)
+                if item:
+                    self._setFileItemAnnotated(item, True, saved_in_session=True)
             # disable allows next and previous image to proceed
             # self.filename = filename
             return True
@@ -2536,6 +2539,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addRecentFile(self.filename)
         self.toggleActions(True)
         self.canvas.setFocus()
+        # Store the row index of the currently loaded file
+        self._current_file_row = self.fileListWidget.currentRow()
         self.show_status_message(self.tr("Loaded %s") % osp.basename(filename))
         logger.debug("loaded file: {!r}", filename)
         return True
