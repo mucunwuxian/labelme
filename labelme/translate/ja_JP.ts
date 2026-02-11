@@ -939,7 +939,7 @@ Opacity</source>
     <message>
         <location filename="../app.py" line="0"/>
         <source>You are about to permanently delete this label file, proceed anyway?</source>
-        <translation>このラベルファイルを完全に削除します。続行しますか？</translation>
+        <translation>このラベルファイル（.json）を完全に削除します。続行しますか？</translation>
     </message>
     <message>
         <location filename="../app.py" line="0"/>

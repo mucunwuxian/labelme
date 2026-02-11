@@ -260,6 +260,10 @@ class Canvas(QtWidgets.QWidget):
         if point_circle_color:
             self._cursor_overlay.setPointCircleColor(point_circle_color)
 
+    def refreshCursorOverlay(self):
+        """Public method to refresh the cursor overlay state."""
+        self._updateCursorOverlay()
+
     def fillDrawing(self):
         return self._fill_drawing
 
@@ -354,6 +358,8 @@ class Canvas(QtWidgets.QWidget):
             self._update_status()
             return
         self.overrideCursor(self._cursor)
+        # Restore cursor overlay when mouse enters (e.g., after dialog closes)
+        self._updateCursorOverlay()
         self._update_status()
 
     def leaveEvent(self, a0: QtCore.QEvent) -> None:
@@ -372,6 +378,13 @@ class Canvas(QtWidgets.QWidget):
         self.restoreCursor()
         if self._cursor_debug:
             self._log_cursor_state("focusOutEvent:after")
+        self._update_status()
+
+    def focusInEvent(self, a0: QtGui.QFocusEvent) -> None:
+        if self._cursor_debug:
+            self._log_cursor_state("focusInEvent")
+        # Restore cursor overlay when focus returns (e.g., after dialog closes)
+        self._updateCursorOverlay()
         self._update_status()
 
     def isVisible(self, shape):  # type: ignore[override]
@@ -1342,6 +1355,9 @@ class Canvas(QtWidgets.QWidget):
         drawing_shape.paint(p)
         p.end()
 
+        # Ensure cursor overlay stays on top after canvas repaint
+        self._cursor_overlay.raise_()
+
     def _onHoverLabelTimeout(self):
         """Called after hover delay; mark label as ready and repaint."""
         self._hover_label_ready = True
@@ -1420,6 +1436,7 @@ class Canvas(QtWidgets.QWidget):
         self.shapes.append(self.current)
         self.storeShapes()
         self.current = None
+        self._near_start_point = False  # Reset for next shape
         self.setHiding(False)
         self.drawingPolygon.emit(False)  # Reset drawing state
         self.newShape.emit()
@@ -1636,6 +1653,9 @@ class Canvas(QtWidgets.QWidget):
         )
         if clear_shapes:
             self.shapes = []
+        # Reset prevMovePoint to avoid out-of-bounds cursor position from previous image
+        self.prevMovePoint = None
+        self._cursor_overlay.hideCursor()
         self.update()
 
     def loadShapes(self, shapes, replace=True):

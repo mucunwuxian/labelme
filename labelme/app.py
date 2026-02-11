@@ -111,10 +111,12 @@ class MainWindow(QtWidgets.QMainWindow):
     _config_file: Path | None
     _config: dict
 
-    # Light blue background for annotated files
-    FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, 30)  # rgba with low alpha
+    # Light blue background for annotated files (already annotated when opened)
+    FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, 20)  # rgba with low alpha
+    # Darker blue for files newly saved in this session
+    FILE_NEWLY_SAVED_COLOR = QtGui.QColor(30, 136, 229, 40)  # rgba with higher alpha
     # Red background for shapes without modification timestamp
-    SHAPE_UNMODIFIED_COLOR = QtGui.QColor(229, 57, 53, 30)  # rgba with low alpha (matching file list style)
+    SHAPE_UNMODIFIED_COLOR = QtGui.QColor(229, 57, 53, 20)  # rgba with low alpha (matching file list style)
 
     filename: str | None
     _text_osam_session: OsamSession | None = None
@@ -124,6 +126,7 @@ class MainWindow(QtWidgets.QMainWindow):
     _zoom_values: dict[str, tuple[_ZoomMode, int]]
     _brightness_contrast_values: dict[str, tuple[int | None, int | None]]
     _prev_opened_dir: str | None
+    _initially_annotated_files: set[str]  # Files already annotated when dir was opened
     _other_data: dict | None
 
     # NB: this tells Mypy etc. that `actions` here
@@ -187,7 +190,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.labelList = LabelListWidget()
+        self.labelList.setStyleSheet("QListView::item { min-height: 24px; padding: 2px 0px; }")
         self._prev_opened_dir = None
+        self._initially_annotated_files: set[str] = set()
 
         # Navigator (minimap)
         self.navigator, self.navigator_dock = self._create_navigator_dock()
@@ -240,6 +245,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileSearch.setPlaceholderText(self.tr("Search Filename"))
         self.fileSearch.textChanged.connect(self.fileSearchChanged)
         self.fileListWidget = QtWidgets.QListWidget()
+        self.fileListWidget.setStyleSheet("QListWidget::item { min-height: 24px; padding: -3px; }")
         self.fileListWidget.itemSelectionChanged.connect(self.fileSelectionChanged)
         fileListLayout = QtWidgets.QVBoxLayout()
         fileListLayout.setContentsMargins(0, 0, 0, 0)
@@ -1736,7 +1742,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._can_continue():
             return
 
-        currIndex = self.imageList.index(str(item.text()))
+        # Use stored full path (UserRole) if available, else fall back to text
+        file_path = item.data(Qt.UserRole)
+        if not file_path:
+            file_path = item.text()
+        currIndex = self.imageList.index(file_path)
         if currIndex < len(self.imageList):
             filename = self.imageList[currIndex]
             if filename:
@@ -1999,11 +2009,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 flags=flags,
             )
             self.labelFile = lf
-            items = self.fileListWidget.findItems(self.imagePath, Qt.MatchExactly)
-            if len(items) > 0:
-                if len(items) != 1:
-                    raise RuntimeError("There are duplicate files.")
-                self._setFileItemAnnotated(items[0], True)
+            # Find and update the current file's list item
+            item = self.fileListWidget.currentItem()
+            if item:
+                self._setFileItemAnnotated(item, True, saved_in_session=True)
             # disable allows next and previous image to proceed
             # self.filename = filename
             return True
@@ -2155,6 +2164,9 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.canvas.undoLastLine()
             self.canvas.shapesBackups.pop()
+
+        # Refresh cursor overlay after label dialog closes
+        self.canvas.refreshCursorOverlay()
 
     def scrollRequest(self, delta, orientation):
         units = -delta * 0.03  # natural scroll (reduced for Wacom compatibility)
@@ -2743,6 +2755,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if filename and self.saveLabels(filename):
             self.addRecentFile(filename)
             self.setClean()
+            # Refresh cursor overlay after save
+            self.canvas.refreshCursorOverlay()
 
     def closeFile(self, _value=False):
         if not self._can_continue():
@@ -2764,12 +2778,21 @@ class MainWindow(QtWidgets.QMainWindow):
         return label_file
 
     def _setFileItemAnnotated(
-        self, item: QtWidgets.QListWidgetItem, annotated: bool
+        self, item: QtWidgets.QListWidgetItem, annotated: bool, saved_in_session: bool = False
     ) -> None:
-        """Set file list item check state and background color."""
+        """Set file list item check state and background color.
+
+        Args:
+            item: The list widget item to update
+            annotated: Whether the file has annotations
+            saved_in_session: If True, use darker blue (alpha 40) for files saved in this session
+        """
         if annotated:
             item.setCheckState(Qt.Checked)
-            item.setBackground(self.FILE_ANNOTATED_COLOR)
+            if saved_in_session:
+                item.setBackground(self.FILE_NEWLY_SAVED_COLOR)
+            else:
+                item.setBackground(self.FILE_ANNOTATED_COLOR)
         else:
             item.setCheckState(Qt.Unchecked)
             item.setBackground(QtGui.QBrush())  # Clear background
@@ -3266,7 +3289,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(self.fileListWidget.count()):
             item = self.fileListWidget.item(i)
             assert item
-            lst.append(item.text())
+            # Use stored full path (UserRole) if available, else fall back to text
+            path = item.data(Qt.UserRole)
+            lst.append(path if path else item.text())
         return lst
 
     def importDroppedImageFiles(self, imageFiles):
@@ -3283,7 +3308,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.output_dir:
                 label_file_without_path = osp.basename(label_file)
                 label_file = osp.join(self.output_dir, label_file_without_path)
-            item = QtWidgets.QListWidgetItem(file)
+            # Display as {dir_name}/{file_name}
+            dir_name = osp.basename(osp.dirname(file))
+            file_name = osp.basename(file)
+            display_name = f"{dir_name}/{file_name}" if dir_name else file_name
+            item = QtWidgets.QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, file)  # Store full path
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             is_annotated = (
                 QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
@@ -3307,6 +3337,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._prev_opened_dir = root_dir
+        self._initially_annotated_files = set()  # Reset when opening new directory
         self.filename = None
         self.fileListWidget.clear()
 
@@ -3345,11 +3376,18 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.output_dir:
                 label_file_without_path = osp.basename(label_file)
                 label_file = osp.join(self.output_dir, label_file_without_path)
-            item = QtWidgets.QListWidgetItem(filename)
+            # Display as {dir_name}/{file_name}
+            dir_name = osp.basename(root_dir) if root_dir else ""
+            file_name = osp.basename(filename)
+            display_name = f"{dir_name}/{file_name}" if dir_name else file_name
+            item = QtWidgets.QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, filename)  # Store full path
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             is_annotated = (
                 QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
             )
+            if is_annotated:
+                self._initially_annotated_files.add(filename)
             self._setFileItemAnnotated(item, is_annotated)
             self.fileListWidget.addItem(item)
 
