@@ -2032,14 +2032,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pasteSelectedShape()
 
     def pasteSelectedShape(self):
-        # Create copies with offset
-        offset = 20
+        # Create copies with offset (in image coordinates, adjusted for zoom)
+        screen_offset = 20  # Constant offset in screen pixels
+        image_offset = screen_offset / self.canvas.scale  # Convert to image coordinates
         new_shapes = []
         for shape in self._copied_shapes:
             new_shape = shape.copy()
             for point in new_shape.points:
-                point.setX(point.x() + offset)
-                point.setY(point.y() + offset)
+                point.setX(point.x() + image_offset)
+                point.setY(point.y() + image_offset)
             new_shapes.append(new_shape)
         # Update _copied_shapes with offset for next paste
         self._copied_shapes = new_shapes
