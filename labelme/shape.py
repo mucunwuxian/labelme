@@ -43,9 +43,6 @@ class Shape:
     # Flag to hide vertex outline during vertex dragging (set by canvas)
     hide_vertex_outline = False
 
-    # Flag to hide edge midpoint during edge midpoint dragging (set by canvas)
-    hide_edge_midpoint = False
-
     # The following class variables influence the drawing of all shape objects.
     line_color: QtGui.QColor = QtGui.QColor(0, 255, 0, 102)  # 60% transparency
     fill_color: QtGui.QColor = QtGui.QColor(0, 0, 0, 51)  # 80% transparency
@@ -93,6 +90,7 @@ class Shape:
             self.MOVE_VERTEX: (3, self.P_SQUARE),
         }
         self._highlightEdgeMidpoint = None  # For rectangle edge midpoint highlighting
+        self._hide_edge_midpoint = False  # Hide edge midpoints during edge dragging (instance-level)
         self._is_creating = False  # True when shape is being created (for start vertex highlight)
         self._is_line_preview = False  # True only for the preview line (self.line in canvas)
 
@@ -404,8 +402,8 @@ class Shape:
 
     def drawEdgeMidpoint(self, painter, point, is_horizontal, highlighted=False):
         """Draw a capsule-shaped handle at edge midpoint."""
-        # Hide edge midpoint during dragging
-        if Shape.hide_edge_midpoint:
+        # Hide edge midpoint during dragging (only for this shape)
+        if self._hide_edge_midpoint:
             return
         # Check if rectangle is large enough to show edge handles
         if len(self.points) != 2:

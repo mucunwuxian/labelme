@@ -861,7 +861,7 @@ class Canvas(QtWidgets.QWidget):
                 elif self.hEdgeMidpoint is not None:
                     self._edge_midpoint_dragging = True
                     self._dragging_edge_index = self.hEdgeMidpoint
-                    Shape.hide_edge_midpoint = True  # Hide edge midpoint during drag
+                    self.hShape._hide_edge_midpoint = True  # Hide edge midpoint during drag
                     self.prevMovePoint = pos  # Set immediately for grid line
                     self._force_blank_cursor()
                     self._updateCursorOverlay()  # Show cursor overlay immediately
@@ -969,9 +969,9 @@ class Canvas(QtWidgets.QWidget):
         if self._edge_midpoint_dragging:
             if self.hShape:
                 self.hShape.touch()  # Update modification timestamp
+                self.hShape._hide_edge_midpoint = False  # Restore edge midpoint
             self._edge_midpoint_dragging = False
             self._dragging_edge_index = None
-            Shape.hide_edge_midpoint = False  # Restore edge midpoint
             # Restore all stacked cursors from drag
             while QtWidgets.QApplication.overrideCursor() is not None:
                 QtWidgets.QApplication.restoreOverrideCursor()
