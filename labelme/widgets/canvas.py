@@ -783,6 +783,9 @@ class Canvas(QtWidgets.QWidget):
         if a0.button() == Qt.LeftButton:
             if self.drawing():
                 self._undone_points.clear()
+                redo_action = getattr(self, "_redo_action", None)
+                if redo_action is not None:
+                    redo_action.setEnabled(False)
                 if self.current:
                     # Add point to existing shape.
                     if self.createMode == "polygon":

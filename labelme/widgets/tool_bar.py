@@ -44,7 +44,12 @@ class ToolBar(QtWidgets.QToolBar):
         btn = QtWidgets.QToolButton()
         btn.setDefaultAction(action)
         btn.setToolButtonStyle(self.toolButtonStyle())
-        self.addWidget(btn)
+        toolbar_action = self.addWidget(btn)
+
+        # Track action -> toolbar internal action mapping
+        if not hasattr(self, "_action_buttons"):
+            self._action_buttons = {}
+        self._action_buttons[action] = toolbar_action
 
         # center align
         for i in range(self.layout().count()):

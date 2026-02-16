@@ -651,6 +651,14 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("最後に元に戻した図形追加・編集をやり直す"),
             enabled=False,
         )
+        redo.setVisible(False)
+
+        showRedo = action(
+            self.tr("やり直すボタンを表示"),
+            self._toggle_redo_visible,
+            checkable=True,
+            checked=False,
+        )
 
         hideAll = action(
             self.tr("&Hide\nPolygons"),
@@ -957,6 +965,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
             redo=redo,
+            showRedo=showRedo,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
         )
@@ -1077,6 +1086,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 brightnessContrast,
                 self.actions.toggle_keep_prev_brightness_contrast,
+                None,
+                showRedo,
             ),
         )
 
@@ -1112,9 +1123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_text_to_annotation_widget)
 
-        self.addToolBar(
-            Qt.TopToolBarArea,
-            ToolBar(
+        tools_toolbar = ToolBar(
                 title="Tools",
                 actions=[
                     open_,
@@ -1147,8 +1156,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     ai_prompt_action,
                 ],
                 font_base=self.font(),
-            ),
         )
+        self.addToolBar(Qt.TopToolBarArea, tools_toolbar)
+        self._tools_toolbar = tools_toolbar
         self.addToolBar(
             Qt.LeftToolBarArea,
             ToolBar(
@@ -1244,6 +1254,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "canvas/skipDeleteConfirm", False, type=bool
         )
         self.skipDeleteConfirmCheckbox.setChecked(skipDeleteConfirmEnabled)
+        showRedoEnabled = self.settings.value("view/showRedo", False, type=bool)
+        self.actions.showRedo.setChecked(showRedoEnabled)
+        self._toggle_redo_visible(showRedoEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -1435,6 +1448,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def setDirty(self):
         # Even if we autosave the file, we keep the ability to undo
         self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
 
         if self._config["auto_save"] or self.actions.saveAuto.isChecked():
             assert self.imagePath
@@ -1572,6 +1586,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelFile = None
         self._other_data = None
         self.canvas.resetState()
+        self.actions.redo.setEnabled(False)
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -1626,6 +1641,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.editMode.setEnabled(not drawing)
         self.actions.undoLastPoint.setEnabled(drawing)
         self.actions.undo.setEnabled(True)
+        if drawing:
+            self.actions.redo.setEnabled(False)
+        else:
+            self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
         # delete/duplicate/copy: only enable if not drawing AND shapes are selected
         n_selected = len(self.canvas.selectedShapes) if not drawing else 0
         self.actions.delete.setEnabled(n_selected > 0)
@@ -2479,6 +2498,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     shape.select_fill_color.setAlpha(min(alpha + 50, 255))
             self.canvas.update()
 
+    def _toggle_redo_visible(self, checked: bool) -> None:
+        self.actions.redo.setVisible(checked)
+        if hasattr(self, "_tools_toolbar"):
+            buttons = getattr(self._tools_toolbar, "_action_buttons", {})
+            toolbar_action = buttons.get(self.actions.redo)
+            if toolbar_action is not None:
+                toolbar_action.setVisible(checked)
+
     def _line_width_changed(self, value: int) -> None:
         """Update line width for all shapes."""
         Shape.PEN_WIDTH = value
@@ -2743,6 +2770,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "canvas/skipDeleteConfirm",
             self.skipDeleteConfirmCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showRedo", self.actions.showRedo.isChecked()
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
