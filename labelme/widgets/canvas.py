@@ -145,6 +145,7 @@ class Canvas(QtWidgets.QWidget):
         self._dragging_edge_index = None  # Which edge is being dragged (EDGE_TOP, etc.)
         self._cursor_debug = os.environ.get("LABELME_CURSOR_DEBUG") == "1"
         self._custom_cursor_enabled = False
+        self._right_click_edit_enabled = False
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
 
@@ -270,6 +271,9 @@ class Canvas(QtWidgets.QWidget):
         self._custom_cursor_enabled = enabled
         self._updateCursorOverlay()
 
+    def setRightClickEditEnabled(self, enabled: bool):
+        self._right_click_edit_enabled = enabled
+
     def refreshCursorOverlay(self):
         """Public method to refresh the cursor overlay state."""
         self._updateCursorOverlay()
@@ -333,6 +337,7 @@ class Canvas(QtWidgets.QWidget):
         if len(self.shapesBackups) > self.num_backups:
             self.shapesBackups = self.shapesBackups[-self.num_backups - 1 :]
         self.shapesBackups.append(shapesBackup)
+        self.shapesRedoStack.clear()
 
     @property
     def isShapeRestorable(self):
@@ -349,7 +354,8 @@ class Canvas(QtWidgets.QWidget):
         # and app.py::loadShapes and our own Canvas::loadShapes function.
         if not self.isShapeRestorable:
             return
-        self.shapesBackups.pop()  # latest
+        redone = self.shapesBackups.pop()  # latest
+        self.shapesRedoStack.append(redone)
 
         # The application will eventually call Canvas.loadShapes which will
         # push this right back onto the stack.
@@ -359,6 +365,20 @@ class Canvas(QtWidgets.QWidget):
         for shape in self.shapes:
             shape.selected = False
         self.update()
+
+    def redoShape(self):
+        if not self.isShapeRedoable:
+            return
+        shapesRedo = self.shapesRedoStack.pop()
+        self.shapes = shapesRedo
+        self.selectedShapes = []
+        for shape in self.shapes:
+            shape.selected = False
+        self.update()
+
+    @property
+    def isShapeRedoable(self):
+        return len(self.shapesRedoStack) > 0
 
     def enterEvent(self, a0: QtCore.QEvent) -> None:
         if self._cursor_debug:
@@ -762,6 +782,7 @@ class Canvas(QtWidgets.QWidget):
 
         if a0.button() == Qt.LeftButton:
             if self.drawing():
+                self._undone_points.clear()
                 if self.current:
                     # Add point to existing shape.
                     if self.createMode == "polygon":
@@ -880,7 +901,25 @@ class Canvas(QtWidgets.QWidget):
                     self._updateCursorOverlay()  # Show cursor overlay immediately
                 self.repaint()
         elif a0.button() == Qt.RightButton:
-            if self.drawing():
+            if self.drawing() and not self._right_click_edit_enabled:
+                # Show context menu during drawing (undo last point, etc.)
+                menu = self.menus[0]
+                undo_action = getattr(self, "_undo_action", None)
+                redo_action = getattr(self, "_redo_action", None)
+                orig_undo_text = None
+                orig_redo_text = None
+                if undo_action is not None and self.current:
+                    orig_undo_text = undo_action.text()
+                    undo_action.setText("元に戻す（最後の頂点を取り消し）")
+                if redo_action is not None and self.current and self._undone_points:
+                    orig_redo_text = redo_action.text()
+                    redo_action.setText("やり直す（最後の頂点を再適用）")
+                menu.exec_(self.mapToGlobal(a0.pos()))
+                if undo_action is not None and orig_undo_text is not None:
+                    undo_action.setText(orig_undo_text)
+                if redo_action is not None and orig_redo_text is not None:
+                    redo_action.setText(orig_redo_text)
+            elif self.drawing():
                 # Switch from create mode to edit mode
                 self.current = None
                 self.line.points = []
@@ -1646,12 +1685,23 @@ class Canvas(QtWidgets.QWidget):
     def undoLastPoint(self):
         if not self.current or self.current.isClosed():
             return
-        self.current.popPoint()
+        point = self.current.popPoint()
+        self._undone_points.append(point)
         if len(self.current) > 0:
             self.line[0] = self.current[-1]
         else:
             self.current = None
             self.drawingPolygon.emit(False)
+        self.update()
+
+    def redoLastPoint(self):
+        if not self._undone_points:
+            return
+        if not self.current:
+            return
+        point = self._undone_points.pop()
+        self.current.addPoint(point)
+        self.line[0] = self.current[-1]
         self.update()
 
     def loadPixmap(self, pixmap, clear_shapes=True):
@@ -1821,6 +1871,8 @@ class Canvas(QtWidgets.QWidget):
         self._pixmap_hash = None
         self.shapes = []
         self.shapesBackups = []
+        self.shapesRedoStack = []
+        self._undone_points = []
         self.movingShape = False
         self.selectedShapes = []
         self.selectedShapesCopy = []

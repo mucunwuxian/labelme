@@ -298,6 +298,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.customCursorCheckbox = QtWidgets.QCheckBox()
         self.customCursorCheckbox.toggled.connect(self._custom_cursor_toggled)
 
+        self.rightClickEditCheckbox = QtWidgets.QCheckBox()
+        self.rightClickEditCheckbox.toggled.connect(self._right_click_edit_toggled)
+
+        self.skipDeleteConfirmCheckbox = QtWidgets.QCheckBox()
+
         self.setAcceptDrops(True)
 
         self.canvas = Canvas(
@@ -638,6 +643,14 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("Undo last add and edit of shape"),
             enabled=False,
         )
+        redo = action(
+            self.tr("やり直す"),
+            self.redoShapeEdit,
+            "Ctrl+Shift+Z",
+            icon="arrow-u-up-right.svg",
+            tip=self.tr("最後に元に戻した図形追加・編集をやり直す"),
+            enabled=False,
+        )
 
         hideAll = action(
             self.tr("&Hide\nPolygons"),
@@ -731,6 +744,30 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         customCursor.setDefaultWidget(QtWidgets.QWidget())
         customCursor.defaultWidget().setLayout(customCursorBoxLayout)
+
+        # Right-click edit mode checkbox widget
+        rightClickEdit = QtWidgets.QWidgetAction(self)
+        rightClickEditBoxLayout = QtWidgets.QVBoxLayout()
+        rightClickEditLabel = QtWidgets.QLabel(self.tr("右クリックで\n編集に切替"))
+        rightClickEditLabel.setAlignment(Qt.AlignCenter)
+        rightClickEditBoxLayout.addWidget(rightClickEditLabel)
+        rightClickEditBoxLayout.addWidget(
+            self.rightClickEditCheckbox, alignment=Qt.AlignCenter
+        )
+        rightClickEdit.setDefaultWidget(QtWidgets.QWidget())
+        rightClickEdit.defaultWidget().setLayout(rightClickEditBoxLayout)
+
+        # Skip delete confirmation checkbox widget
+        skipDeleteConfirm = QtWidgets.QWidgetAction(self)
+        skipDeleteConfirmBoxLayout = QtWidgets.QVBoxLayout()
+        skipDeleteConfirmLabel = QtWidgets.QLabel(self.tr("ポリゴン削除\n確認不要"))
+        skipDeleteConfirmLabel.setAlignment(Qt.AlignCenter)
+        skipDeleteConfirmBoxLayout.addWidget(skipDeleteConfirmLabel)
+        skipDeleteConfirmBoxLayout.addWidget(
+            self.skipDeleteConfirmCheckbox, alignment=Qt.AlignCenter
+        )
+        skipDeleteConfirm.setDefaultWidget(QtWidgets.QWidget())
+        skipDeleteConfirm.defaultWidget().setLayout(skipDeleteConfirmBoxLayout)
 
         self.zoomWidget.setWhatsThis(
             str(
@@ -919,6 +956,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWindow=fitWindow,
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
+            redo=redo,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
         )
@@ -963,7 +1001,7 @@ class MainWindow(QtWidgets.QMainWindow):
             duplicate,
             delete,
             undo,
-            undoLastPoint,
+            redo,
             removePoint,
         )
         # XXX: need to add some actions here to activate the shortcut
@@ -1046,6 +1084,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Custom context menu for the canvas widget:
         utils.addActions(self.canvas.menus[0], self.context_menu_actions)
+        self.canvas._undo_action = self.actions.undo
+        self.canvas._redo_action = self.actions.redo
         utils.addActions(
             self.canvas.menus[1],
             (
@@ -1090,7 +1130,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     duplicate,
                     delete,
                     undo,
-                    brightnessContrast,
+                    redo,
                     None,
                     fitWindow,
                     zoom,
@@ -1099,6 +1139,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     fillOpacity,
                     lineWidth,
                     customCursor,
+                    rightClickEdit,
+                    skipDeleteConfirm,
                     None,
                     selectAiModel,
                     None,
@@ -1194,6 +1236,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "canvas/customCursor", False, type=bool
         )
         self.customCursorCheckbox.setChecked(customCursorEnabled)
+        rightClickEditEnabled = self.settings.value(
+            "canvas/rightClickEdit", False, type=bool
+        )
+        self.rightClickEditCheckbox.setChecked(rightClickEditEnabled)
+        skipDeleteConfirmEnabled = self.settings.value(
+            "canvas/skipDeleteConfirm", False, type=bool
+        )
+        self.skipDeleteConfirmCheckbox.setChecked(skipDeleteConfirmEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -1539,10 +1589,30 @@ class MainWindow(QtWidgets.QMainWindow):
     # Callbacks
 
     def undoShapeEdit(self):
+        if self.canvas.drawing() and self.canvas.current:
+            self.canvas.undoLastPoint()
+            self.actions.redo.setEnabled(len(self.canvas._undone_points) > 0)
+            return
         self.canvas.restoreShape()
+        redo_stack = list(self.canvas.shapesRedoStack)
         self.labelList.clear()
         self._load_shapes(self.canvas.shapes)
+        self.canvas.shapesRedoStack = redo_stack
         self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
+
+    def redoShapeEdit(self):
+        if self.canvas.drawing() and self.canvas.current:
+            self.canvas.redoLastPoint()
+            self.actions.redo.setEnabled(len(self.canvas._undone_points) > 0)
+            return
+        self.canvas.redoShape()
+        redo_stack = list(self.canvas.shapesRedoStack)
+        self.labelList.clear()
+        self._load_shapes(self.canvas.shapes)
+        self.canvas.shapesRedoStack = redo_stack
+        self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
 
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
@@ -1555,7 +1625,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         self.actions.editMode.setEnabled(not drawing)
         self.actions.undoLastPoint.setEnabled(drawing)
-        self.actions.undo.setEnabled(not drawing)
+        self.actions.undo.setEnabled(True)
         # delete/duplicate/copy: only enable if not drawing AND shapes are selected
         n_selected = len(self.canvas.selectedShapes) if not drawing else 0
         self.actions.delete.setEnabled(n_selected > 0)
@@ -2419,6 +2489,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.setCustomCursorEnabled(checked)
 
+    def _right_click_edit_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setRightClickEditEnabled(checked)
+
     def setFitWindow(self, value=True):
         if value:
             self.actions.fitWidth.setChecked(False)
@@ -2662,6 +2736,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
         self.settings.setValue(
             "canvas/customCursor", self.customCursorCheckbox.isChecked()
+        )
+        self.settings.setValue(
+            "canvas/rightClickEdit", self.rightClickEditCheckbox.isChecked()
+        )
+        self.settings.setValue(
+            "canvas/skipDeleteConfirm",
+            self.skipDeleteConfirmCheckbox.isChecked(),
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
@@ -3297,6 +3378,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._config["keep_prev"] = not self._config["keep_prev"]
 
     def removeSelectedPoint(self):
+        shape = self.canvas.prevhShape
+        if (
+            shape is not None
+            and shape.shape_type == "polygon"
+            and len(shape.points) <= 3
+        ):
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("Attention"),
+                self.tr("ポリゴンの頂点を3点未満にはできません。"),
+            )
+            return
         self.canvas.removeSelectedPoint()
         self.canvas.update()
         if self.canvas.hShape and not self.canvas.hShape.points:
@@ -3308,6 +3401,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setDirty()
 
     def deleteSelectedShape(self):
+        if not self.skipDeleteConfirmCheckbox.isChecked():
+            yes, no = QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No
+            msg = self.tr(
+                "You are about to permanently delete {} polygons, "
+                "proceed anyway?"
+            ).format(len(self.canvas.selectedShapes))
+            if yes != QtWidgets.QMessageBox.warning(
+                self, self.tr("Attention"), msg, yes | no, yes
+            ):
+                return
         self.remLabels(self.canvas.deleteSelected())
         self.setDirty()
         # Disable selection-dependent actions since nothing is selected now
@@ -3315,6 +3418,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(False)
         self.actions.copy.setEnabled(False)
         self.actions.edit.setEnabled(False)
+        self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
         if self.noShapes():
             for action in self.on_shapes_present_actions:
                 action.setEnabled(False)
