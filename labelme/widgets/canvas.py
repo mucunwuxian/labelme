@@ -86,6 +86,7 @@ class Canvas(QtWidgets.QWidget):
     prevhEdge: int | None
 
     zoomRequest = QtCore.pyqtSignal(int, QPointF)
+    pinchZoomRequest = QtCore.pyqtSignal(float, QPointF)
     scrollRequest = QtCore.pyqtSignal(int, int)
     newShape = QtCore.pyqtSignal()
     selectionChanged = QtCore.pyqtSignal(list)
@@ -1553,13 +1554,8 @@ class Canvas(QtWidgets.QWidget):
             if pinch.state() == Qt.GestureUpdated:
                 # scaleFactor is relative to previous state (>1 = zoom in, <1 = zoom out)
                 scale_factor = pinch.scaleFactor()
-                # Ignore very small changes to prevent jitter
-                if abs(scale_factor - 1.0) < 0.005:
-                    return True
-                # Convert to delta similar to wheel event
-                delta = (scale_factor - 1.0) * 240
                 center = pinch.centerPoint()
-                self.zoomRequest.emit(int(delta), center)
+                self.pinchZoomRequest.emit(scale_factor, center)
             return True
         return False
 

@@ -304,6 +304,7 @@ class MainWindow(QtWidgets.QMainWindow):
             crosshair=self._config["canvas"]["crosshair"],
         )
         self.canvas.zoomRequest.connect(self._zoom_requested)
+        self.canvas.pinchZoomRequest.connect(self._pinch_zoom_requested)
         self.canvas.mouseMoved.connect(self._update_status_stats)
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
 
@@ -2244,7 +2245,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_zoom(value=zoom_value, pos=pos)
 
     def _zoom_requested(self, delta: int, pos: QtCore.QPointF) -> None:
-        self._add_zoom(increment=1.1 if delta > 0 else 0.9, pos=pos)
+        scale_factor = 1 + delta / 1200
+        self._linear_zoom(scale_factor, pos)
+
+    def _pinch_zoom_requested(
+        self, scale_factor: float, pos: QtCore.QPointF
+    ) -> None:
+        self._linear_zoom(scale_factor, pos=None)
+
+    def _linear_zoom(
+        self, scale_factor: float, pos: QtCore.QPointF | None = None
+    ) -> None:
+        """Zoom linearly by multiplying the current zoom by scale_factor."""
+        current = self.zoomWidget.value()
+        new_value = int(round(current * scale_factor))
+        new_value = max(self.ZOOM_LEVELS[0], min(self.ZOOM_LEVELS[-1], new_value))
+        if new_value == current:
+            # Ensure at least 1% change
+            new_value = current + (1 if scale_factor > 1 else -1)
+            new_value = max(self.ZOOM_LEVELS[0], min(self.ZOOM_LEVELS[-1], new_value))
+        self._zoom_mode = _ZoomMode.MANUAL_ZOOM
+        self._set_zoom(value=new_value, pos=pos)
 
     def _updateNavigatorViewport(self):
         """Update the navigator's viewport rectangle based on current scroll/zoom."""
