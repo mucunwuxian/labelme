@@ -295,6 +295,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lineWidthWidget.valueChanged.connect(self._line_width_changed)
         self.lineWidthWidget.setValue(6)  # Default line width
 
+        self.customCursorCheckbox = QtWidgets.QCheckBox()
+        self.customCursorCheckbox.toggled.connect(self._custom_cursor_toggled)
+
         self.setAcceptDrops(True)
 
         self.canvas = Canvas(
@@ -717,6 +720,18 @@ class MainWindow(QtWidgets.QMainWindow):
         lineWidth.setDefaultWidget(QtWidgets.QWidget())
         lineWidth.defaultWidget().setLayout(lineWidthBoxLayout)
 
+        # Custom cursor checkbox widget
+        customCursor = QtWidgets.QWidgetAction(self)
+        customCursorBoxLayout = QtWidgets.QVBoxLayout()
+        customCursorLabel = QtWidgets.QLabel(self.tr("カスタム\nカーソル"))
+        customCursorLabel.setAlignment(Qt.AlignCenter)
+        customCursorBoxLayout.addWidget(customCursorLabel)
+        customCursorBoxLayout.addWidget(
+            self.customCursorCheckbox, alignment=Qt.AlignCenter
+        )
+        customCursor.setDefaultWidget(QtWidgets.QWidget())
+        customCursor.defaultWidget().setLayout(customCursorBoxLayout)
+
         self.zoomWidget.setWhatsThis(
             str(
                 self.tr(
@@ -1083,6 +1098,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     pointOpacity,
                     fillOpacity,
                     lineWidth,
+                    customCursor,
                     None,
                     selectAiModel,
                     None,
@@ -1174,6 +1190,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pointOpacityWidget.setValue(pointOpacity)
         self.fillOpacityWidget.setValue(fillOpacity)
         self.lineWidthWidget.setValue(lineWidth)
+        customCursorEnabled = self.settings.value(
+            "canvas/customCursor", False, type=bool
+        )
+        self.customCursorCheckbox.setChecked(customCursorEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -2395,6 +2415,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.update()
 
+    def _custom_cursor_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setCustomCursorEnabled(checked)
+
     def setFitWindow(self, value=True):
         if value:
             self.actions.fitWidth.setChecked(False)
@@ -2636,6 +2660,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("canvas/pointOpacity", self.pointOpacityWidget.value())
         self.settings.setValue("canvas/fillOpacity", self.fillOpacityWidget.value())
         self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
+        self.settings.setValue(
+            "canvas/customCursor", self.customCursorCheckbox.isChecked()
+        )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
 

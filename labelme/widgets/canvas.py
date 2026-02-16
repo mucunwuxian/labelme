@@ -144,6 +144,7 @@ class Canvas(QtWidgets.QWidget):
         self._edge_midpoint_dragging = False  # True when dragging an edge midpoint
         self._dragging_edge_index = None  # Which edge is being dragged (EDGE_TOP, etc.)
         self._cursor_debug = os.environ.get("LABELME_CURSOR_DEBUG") == "1"
+        self._custom_cursor_enabled = False
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
 
@@ -211,6 +212,10 @@ class Canvas(QtWidgets.QWidget):
 
     def _updateCursorOverlay(self):
         """Update the cursor overlay widget based on current state."""
+        if not self._custom_cursor_enabled:
+            self._cursor_overlay.hideCursor()
+            return
+
         if self.prevMovePoint is None or self.outOfPixmap(self.prevMovePoint):
             self._cursor_overlay.hideCursor()
             # Show arrow cursor in margin area (outside image but inside canvas)
@@ -260,6 +265,10 @@ class Canvas(QtWidgets.QWidget):
         self._cursor_overlay.setCrosshairColor(crosshair_color)
         if point_circle_color:
             self._cursor_overlay.setPointCircleColor(point_circle_color)
+
+    def setCustomCursorEnabled(self, enabled: bool):
+        self._custom_cursor_enabled = enabled
+        self._updateCursorOverlay()
 
     def refreshCursorOverlay(self):
         """Public method to refresh the cursor overlay state."""
@@ -522,7 +531,10 @@ class Canvas(QtWidgets.QWidget):
 
             if self.current or self.createMode in ["point", "polygon", "rectangle"]:
                 # Hide cursor when drawing (show crosshair instead)
-                self.overrideCursor(self._blank_cursor)
+                if self._custom_cursor_enabled:
+                    self.overrideCursor(self._blank_cursor)
+                else:
+                    self.overrideCursor(CURSOR_DRAW)
             else:
                 self.overrideCursor(CURSOR_DRAW)
             if not self.current:
@@ -1711,6 +1723,8 @@ class Canvas(QtWidgets.QWidget):
 
     def _force_blank_cursor(self) -> None:
         """Force blank cursor immediately (click-time) for drag/creation."""
+        if not self._custom_cursor_enabled:
+            return
         if self._cursor_debug:
             self._log_cursor_state("force_blank:before")
         if not self._os_cursor_hidden:
