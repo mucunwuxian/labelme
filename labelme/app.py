@@ -303,6 +303,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.skipDeleteConfirmCheckbox = QtWidgets.QCheckBox()
 
+        self.parallelLineDistCheckbox = QtWidgets.QCheckBox()
+        self.parallelLineDistCheckbox.toggled.connect(
+            self._parallel_line_dist_toggled
+        )
+
+        self.textBoundingCheckbox = QtWidgets.QCheckBox()
+        self.textBoundingCheckbox.toggled.connect(
+            self._text_bounding_toggled
+        )
+
         self.setAcceptDrops(True)
 
         self.canvas = Canvas(
@@ -315,6 +325,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.pinchZoomRequest.connect(self._pinch_zoom_requested)
         self.canvas.mouseMoved.connect(self._update_status_stats)
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
+        if "edge_snap" in self._config:
+            self.canvas.setEdgeSnapConfig(self._config["edge_snap"])
 
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
@@ -347,6 +359,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
+        self.canvas.shapeMoved.connect(self._recompute_reference_medians)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
         self.canvas.editModeChanged.connect(self._onEditModeChanged)
@@ -660,6 +673,20 @@ class MainWindow(QtWidgets.QMainWindow):
             checked=False,
         )
 
+        showParallelLineDist = action(
+            self.tr("平行直線との距離調整を表示"),
+            self._toggle_parallel_line_dist_visible,
+            checkable=True,
+            checked=False,
+        )
+
+        showTextBounding = action(
+            self.tr("文字外接調整を表示"),
+            self._toggle_text_bounding_visible,
+            checkable=True,
+            checked=False,
+        )
+
         hideAll = action(
             self.tr("&Hide\nPolygons"),
             functools.partial(self.togglePolygons, False),
@@ -776,6 +803,33 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         skipDeleteConfirm.setDefaultWidget(QtWidgets.QWidget())
         skipDeleteConfirm.defaultWidget().setLayout(skipDeleteConfirmBoxLayout)
+
+        # Parallel line distance adjustment checkbox widget
+        parallelLineDist = QtWidgets.QWidgetAction(self)
+        parallelLineDistBoxLayout = QtWidgets.QVBoxLayout()
+        parallelLineDistLabel = QtWidgets.QLabel(self.tr("平行直線との\n距離調整"))
+        parallelLineDistLabel.setAlignment(Qt.AlignCenter)
+        parallelLineDistBoxLayout.addWidget(parallelLineDistLabel)
+        parallelLineDistBoxLayout.addWidget(
+            self.parallelLineDistCheckbox, alignment=Qt.AlignCenter
+        )
+        parallelLineDist.setDefaultWidget(QtWidgets.QWidget())
+        parallelLineDist.defaultWidget().setLayout(parallelLineDistBoxLayout)
+        parallelLineDist.setVisible(False)
+        self._parallelLineDistAction = parallelLineDist
+
+        textBounding = QtWidgets.QWidgetAction(self)
+        textBoundingBoxLayout = QtWidgets.QVBoxLayout()
+        textBoundingLabel = QtWidgets.QLabel(self.tr("文字外接\n調整"))
+        textBoundingLabel.setAlignment(Qt.AlignCenter)
+        textBoundingBoxLayout.addWidget(textBoundingLabel)
+        textBoundingBoxLayout.addWidget(
+            self.textBoundingCheckbox, alignment=Qt.AlignCenter
+        )
+        textBounding.setDefaultWidget(QtWidgets.QWidget())
+        textBounding.defaultWidget().setLayout(textBoundingBoxLayout)
+        textBounding.setVisible(False)
+        self._textBoundingAction = textBounding
 
         self.zoomWidget.setWhatsThis(
             str(
@@ -966,6 +1020,8 @@ class MainWindow(QtWidgets.QMainWindow):
             brightnessContrast=brightnessContrast,
             redo=redo,
             showRedo=showRedo,
+            showParallelLineDist=showParallelLineDist,
+            showTextBounding=showTextBounding,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
         )
@@ -1088,6 +1144,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.actions.toggle_keep_prev_brightness_contrast,
                 None,
                 showRedo,
+                showParallelLineDist,
+                showTextBounding,
             ),
         )
 
@@ -1150,6 +1208,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     customCursor,
                     rightClickEdit,
                     skipDeleteConfirm,
+                    parallelLineDist,
+                    textBounding,
                     None,
                     selectAiModel,
                     None,
@@ -1254,9 +1314,27 @@ class MainWindow(QtWidgets.QMainWindow):
             "canvas/skipDeleteConfirm", False, type=bool
         )
         self.skipDeleteConfirmCheckbox.setChecked(skipDeleteConfirmEnabled)
+        parallelLineDistEnabled = self.settings.value(
+            "canvas/parallelLineDist", False, type=bool
+        )
+        self.parallelLineDistCheckbox.setChecked(parallelLineDistEnabled)
         showRedoEnabled = self.settings.value("view/showRedo", False, type=bool)
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
+        showParallelLineDistEnabled = self.settings.value(
+            "view/showParallelLineDist", False, type=bool
+        )
+        self.actions.showParallelLineDist.setChecked(showParallelLineDistEnabled)
+        self._toggle_parallel_line_dist_visible(showParallelLineDistEnabled)
+        textBoundingEnabled = self.settings.value(
+            "canvas/textBounding", False, type=bool
+        )
+        self.textBoundingCheckbox.setChecked(textBoundingEnabled)
+        showTextBoundingEnabled = self.settings.value(
+            "view/showTextBounding", False, type=bool
+        )
+        self.actions.showTextBounding.setChecked(showTextBoundingEnabled)
+        self._toggle_text_bounding_visible(showTextBoundingEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -2021,6 +2099,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.clearSelection()
         self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
         self.canvas.loadShapes(shapes=shapes, replace=replace)
+        self._recompute_reference_medians()
 
     def _load_shape_dicts(self, shape_dicts: list[ShapeDict]) -> None:
         shapes: list[Shape] = []
@@ -2283,6 +2362,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Refresh cursor overlay after label dialog closes
         self.canvas.refreshCursorOverlay()
+        self._recompute_reference_medians()
 
     def scrollRequest(self, delta, orientation):
         units = -delta * 0.03  # natural scroll (reduced for Wacom compatibility)
@@ -2497,6 +2577,65 @@ class MainWindow(QtWidgets.QMainWindow):
                 if "select_fill_color" in shape.__dict__:
                     shape.select_fill_color.setAlpha(min(alpha + 50, 255))
             self.canvas.update()
+
+    def _parallel_line_dist_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setParallelLineDistEnabled(checked)
+
+    def _recompute_reference_medians(self) -> None:
+        if not hasattr(self, "canvas") or self.canvas is None:
+            return
+        cfg = self._config.get("edge_snap", {})
+        medians: dict[str, float | None] = {}
+        # Parallel line rules
+        for i, rule in enumerate(cfg.get("parallel_line", [])):
+            ref_label = rule.get("reference_label")
+            if ref_label is None:
+                continue
+            fallback = rule.get("fallback_distance", 15)
+            ref_side = rule.get("reference_side", "short")
+            sides: list[float] = []
+            for shape in self.canvas.shapes:
+                if shape.label == ref_label:
+                    rect = shape.boundingRect()
+                    if ref_side == "short":
+                        sides.append(min(rect.width(), rect.height()))
+                    else:
+                        sides.append(max(rect.width(), rect.height()))
+            medians[f"pl:{i}"] = (
+                float(np.median(sides)) if sides else fallback
+            )
+        # Text bounding rules
+        for i, rule in enumerate(cfg.get("text_bounding", [])):
+            ref_label = rule.get("reference_label")
+            if ref_label is None:
+                continue
+            fallback = rule.get("fallback_distance", 15)
+            ref_side = rule.get("reference_side", "short")
+            sides: list[float] = []
+            for shape in self.canvas.shapes:
+                if shape.label == ref_label:
+                    rect = shape.boundingRect()
+                    if ref_side == "short":
+                        sides.append(min(rect.width(), rect.height()))
+                    else:
+                        sides.append(max(rect.width(), rect.height()))
+            medians[f"tb:{i}"] = (
+                float(np.median(sides)) if sides else fallback
+            )
+        self.canvas.setReferenceMedians(medians)
+
+    def _toggle_parallel_line_dist_visible(self, checked: bool) -> None:
+        if hasattr(self, "_parallelLineDistAction"):
+            self._parallelLineDistAction.setVisible(checked)
+
+    def _text_bounding_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setTextBoundingEnabled(checked)
+
+    def _toggle_text_bounding_visible(self, checked: bool) -> None:
+        if hasattr(self, "_textBoundingAction"):
+            self._textBoundingAction.setVisible(checked)
 
     def _toggle_redo_visible(self, checked: bool) -> None:
         self.actions.redo.setVisible(checked)
@@ -2772,7 +2911,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.skipDeleteConfirmCheckbox.isChecked(),
         )
         self.settings.setValue(
+            "canvas/parallelLineDist",
+            self.parallelLineDistCheckbox.isChecked(),
+        )
+        self.settings.setValue(
             "view/showRedo", self.actions.showRedo.isChecked()
+        )
+        self.settings.setValue(
+            "view/showParallelLineDist",
+            self.actions.showParallelLineDist.isChecked(),
+        )
+        self.settings.setValue(
+            "canvas/textBounding",
+            self.textBoundingCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showTextBounding",
+            self.actions.showTextBounding.isChecked(),
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
@@ -3450,6 +3605,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.edit.setEnabled(False)
         self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
         self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
+        self._recompute_reference_medians()
         if self.noShapes():
             for action in self.on_shapes_present_actions:
                 action.setEnabled(False)

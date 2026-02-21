@@ -81,6 +81,36 @@ canvas:
     ai_polygon: false
     ai_mask: false
 
+# Edge snap adjustment features (rectangle edge midpoint drag only)
+# Each feature is a list of rules. Empty list = disabled.
+# Shift key cancels snap during drag.
+# Example:
+#   edge_snap:
+#     parallel_line:
+#       - target_label: "notes"
+#         reference_label: "arrow"
+#         reference_side: "short"     # "short" or "long"
+#         distance_ratio: 0.80        # snap offset = ref_dist * ratio
+#         snap_range: 0.75            # trigger zone = offset ± ref_dist * range
+#         fallback_distance: 15       # used when no reference shapes exist
+#         sample_points: 11
+#         consecutive_window: 8
+#         distance_tolerance: 5
+#         dark_pixel_threshold: 128
+#     text_bounding:
+#       - target_label: "title"
+#         reference_label: "arrow"    # null = snap directly to boundary
+#         reference_side: "short"
+#         distance_ratio: 0.05        # 0.0 = snap to boundary, >0 = offset
+#         snap_range: 0.75
+#         fallback_distance: 15
+#         luminance_threshold: 30
+#         min_agreement: 6
+#         distance_tolerance: 5
+edge_snap:
+  parallel_line: []
+  text_bounding: []
+
 shortcuts:
   close: Ctrl+W
   open: Ctrl+O

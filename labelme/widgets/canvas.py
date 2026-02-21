@@ -143,9 +143,17 @@ class Canvas(QtWidgets.QWidget):
         self._vertex_dragging = False  # True when dragging a vertex
         self._edge_midpoint_dragging = False  # True when dragging an edge midpoint
         self._dragging_edge_index = None  # Which edge is being dragged (EDGE_TOP, etc.)
+        self._snap_active = False  # True when parallel line snap is active
+        self._snap_line_pos = None  # Position of detected parallel line (image coords)
         self._cursor_debug = os.environ.get("LABELME_CURSOR_DEBUG") == "1"
         self._custom_cursor_enabled = False
         self._right_click_edit_enabled = False
+        self._parallel_line_dist_enabled = False
+        self._text_bounding_enabled = False
+        self._text_bounding_snap_dots: list[tuple[float, float]] | None = None
+        self._tb_boundary_cache: tuple | None = None  # cached boundary during drag
+        self._edge_snap_config: dict | None = None
+        self._reference_medians: dict[str, float | None] = {}
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
 
@@ -273,6 +281,18 @@ class Canvas(QtWidgets.QWidget):
 
     def setRightClickEditEnabled(self, enabled: bool):
         self._right_click_edit_enabled = enabled
+
+    def setParallelLineDistEnabled(self, enabled: bool):
+        self._parallel_line_dist_enabled = enabled
+
+    def setTextBoundingEnabled(self, enabled: bool):
+        self._text_bounding_enabled = enabled
+
+    def setEdgeSnapConfig(self, config: dict):
+        self._edge_snap_config = config
+
+    def setReferenceMedians(self, medians: dict[str, float | None]):
+        self._reference_medians = medians
 
     def refreshCursorOverlay(self):
         """Public method to refresh the cursor overlay state."""
@@ -1027,6 +1047,10 @@ class Canvas(QtWidgets.QWidget):
                 self.hShape._hide_edge_midpoint = False  # Restore edge midpoint
             self._edge_midpoint_dragging = False
             self._dragging_edge_index = None
+            self._snap_active = False
+            self._snap_line_pos = None
+            self._text_bounding_snap_dots = None
+            self._tb_boundary_cache = None
             # Restore all stacked cursors from drag
             while QtWidgets.QApplication.overrideCursor() is not None:
                 QtWidgets.QApplication.restoreOverrideCursor()
@@ -1203,8 +1227,505 @@ class Canvas(QtWidgets.QWidget):
         if self.outOfPixmap(pos):
             return
 
-        # Move edge to cursor position (like vertex dragging)
-        self.hShape.moveEdgeTo(self.hEdgeMidpoint, pos)
+        snap_pos = pos
+        self._snap_active = False
+        self._snap_line_pos = None
+        self._text_bounding_snap_dots = None
+
+        # Shift held → cancel all snap adjustments
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        shift_held = bool(modifiers & Qt.ShiftModifier)
+
+        if (
+            shift_held
+            or self._grayscale_cache is None
+            or self.hShape.shape_type != "rectangle"
+        ):
+            self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+            return
+
+        cfg = self._edge_snap_config or {}
+
+        # Parallel line snap: try each rule in order
+        if self._parallel_line_dist_enabled:
+            for i, rule in enumerate(cfg.get("parallel_line", [])):
+                if self.hShape.label != rule.get("target_label"):
+                    continue
+                median = self._reference_medians.get(f"pl:{i}")
+                if median is None:
+                    continue
+                result = self._detect_parallel_line_snap(
+                    rule, median, self.hShape, self.hEdgeMidpoint, pos,
+                )
+                if result is not None:
+                    snap_pos, line_pos = result
+                    self._snap_active = True
+                    self._snap_line_pos = line_pos
+                    break
+
+        # Text bounding snap: try each rule (only if parallel line didn't snap)
+        if not self._snap_active and self._text_bounding_enabled:
+            for i, rule in enumerate(cfg.get("text_bounding", [])):
+                if self.hShape.label != rule.get("target_label"):
+                    continue
+                result = self._detect_text_bounding_snap(
+                    rule, i, self.hShape, self.hEdgeMidpoint, pos,
+                )
+                if result is not None:
+                    snap_pos, dots = result
+                    self._text_bounding_snap_dots = dots
+                    break
+
+        self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+
+    # -- Parallel line snap detection defaults (overridden by edge_snap config) --
+    _PL_DEFAULTS = {
+        "dark_pixel_threshold": 128,
+        "sample_points": 11,
+        "consecutive_window": 8,
+        "distance_tolerance": 5,
+        "snap_range": 0.75,
+        "distance_ratio": 0.80,
+        "fallback_distance": 15,
+    }
+    # -- Text bounding snap detection defaults --
+    _TB_DEFAULTS = {
+        "luminance_threshold": 30,
+        "min_agreement": 6,
+        "distance_tolerance": 5,
+        "snap_range": 0.75,
+        "distance_ratio": 0.05,
+        "fallback_distance": 15,
+        "scan_offset": 0,
+    }
+
+    def _detect_parallel_line_snap(
+        self,
+        rule: dict,
+        median: float,
+        shape,
+        edge_index: int,
+        cursor_pos: QPointF,
+    ) -> tuple[QPointF, float] | None:
+        """Detect a parallel line and snap the edge to reference median distance.
+
+        Returns (snapped_pos, line_pos_in_image_coords) or None.
+        """
+        from labelme.shape import Shape
+
+        d = self._PL_DEFAULTS
+        ratio = rule.get("distance_ratio", d["distance_ratio"])
+        snap_range = rule.get("snap_range", d["snap_range"])
+        sample_points = rule.get("sample_points", d["sample_points"])
+        consec_window = rule.get("consecutive_window", d["consecutive_window"])
+        dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
+        dark_thresh = rule.get("dark_pixel_threshold", d["dark_pixel_threshold"])
+
+        ref_dist = median
+        M = ref_dist * ratio
+        snap_window = ref_dist * snap_range
+        grayscale = self._grayscale_cache
+        img_h, img_w = grayscale.shape
+        max_scan = max(int(ref_dist * 3), 100)
+
+        p0, p1 = shape.points[0], shape.points[1]
+        left = min(p0.x(), p1.x())
+        right = max(p0.x(), p1.x())
+        top = min(p0.y(), p1.y())
+        bottom = max(p0.y(), p1.y())
+
+        lo = max(0.0, M - snap_window)
+        hi = M + snap_window
+
+        if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+            if edge_index == Shape.EDGE_BOTTOM:
+                shape_edge_val = bottom
+                scan_dir = -1
+            else:
+                shape_edge_val = top
+                scan_dir = 1
+            xs = np.linspace(left, right, sample_points + 2)[1:-1]
+            iy = int(round(shape_edge_val))
+            if iy < 0 or iy >= img_h:
+                return None
+
+            line_pos = self._detect_line_h(
+                xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
+                consec_window, dist_tol, dark_thresh,
+            )
+            if line_pos is not None:
+                dist = abs(line_pos - cursor_pos.y())
+                if lo <= dist <= hi:
+                    snapped_y = line_pos - scan_dir * M
+                    return (QPointF(cursor_pos.x(), snapped_y), line_pos)
+            return None
+
+        elif edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+            if edge_index == Shape.EDGE_LEFT:
+                shape_edge_val = left
+                scan_dir = 1
+            else:
+                shape_edge_val = right
+                scan_dir = -1
+            ys = np.linspace(top, bottom, sample_points + 2)[1:-1]
+            ix = int(round(shape_edge_val))
+            if ix < 0 or ix >= img_w:
+                return None
+
+            line_pos = self._detect_line_v(
+                ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
+                consec_window, dist_tol, dark_thresh,
+            )
+            if line_pos is not None:
+                dist = abs(line_pos - cursor_pos.x())
+                if lo <= dist <= hi:
+                    snapped_x = line_pos - scan_dir * M
+                    return (QPointF(snapped_x, cursor_pos.y()), line_pos)
+            return None
+
+        return None
+
+    def _detect_line_h(self, xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
+                       consec_window, dist_tol, dark_thresh):
+        """Detect parallel line by scanning vertically from horizontal edge samples.
+
+        Uses cascade early termination: scans core points (shared by all
+        consecutive windows) first, aborting immediately if any core point
+        misses. Then tries each window lazily.
+
+        Returns absolute y position of detected line center, or None.
+        """
+        n = len(xs)
+        w = consec_window
+        tol = dist_tol
+        thresh = dark_thresh
+        hits = [None] * n  # None = not yet scanned
+
+        def scan(idx):
+            if hits[idx] is not None:
+                return hits[idx]
+            x = xs[idx]
+            col = int(round(x))
+            if col < 0 or col >= img_w:
+                hits[idx] = (False, -1.0)
+                return hits[idx]
+            for d in range(1, max_scan + 1):
+                sy = iy + scan_dir * d
+                if sy < 0 or sy >= img_h:
+                    break
+                if grayscale[sy, col] < thresh:
+                    sy_end = sy
+                    for d2 in range(d + 1, max_scan + 1):
+                        sy2 = iy + scan_dir * d2
+                        if sy2 < 0 or sy2 >= img_h:
+                            break
+                        if grayscale[sy2, col] < thresh:
+                            sy_end = sy2
+                        else:
+                            break
+                    hits[idx] = (True, (sy + sy_end) / 2.0)
+                    return hits[idx]
+            hits[idx] = (False, -1.0)
+            return hits[idx]
+
+        # Phase 1: scan core points shared by ALL windows (indices n-w .. w-1)
+        # For n=11, w=8: core = indices 3,4,5,6,7
+        for i in range(n - w, w):
+            if not scan(i)[0]:
+                return None  # no window can succeed
+
+        # Phase 2: try each window, scanning remaining edge points lazily
+        for start in range(n - w + 1):
+            all_found = True
+            for i in range(start, start + w):
+                if not scan(i)[0]:
+                    all_found = False
+                    break
+            if not all_found:
+                continue
+            positions = [hits[i][1] for i in range(start, start + w)]
+            line_pos = float(np.median(positions))
+            if all(abs(p - line_pos) <= tol for p in positions):
+                return line_pos
+
+        return None
+
+    def _detect_line_v(self, ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
+                       consec_window, dist_tol, dark_thresh):
+        """Detect parallel line by scanning horizontally from vertical edge samples.
+
+        Uses cascade early termination (same logic as _detect_line_h).
+
+        Returns absolute x position of detected line center, or None.
+        """
+        n = len(ys)
+        w = consec_window
+        tol = dist_tol
+        thresh = dark_thresh
+        hits = [None] * n
+
+        def scan(idx):
+            if hits[idx] is not None:
+                return hits[idx]
+            y = ys[idx]
+            row = int(round(y))
+            if row < 0 or row >= img_h:
+                hits[idx] = (False, -1.0)
+                return hits[idx]
+            for d in range(1, max_scan + 1):
+                sx = ix + scan_dir * d
+                if sx < 0 or sx >= img_w:
+                    break
+                if grayscale[row, sx] < thresh:
+                    sx_end = sx
+                    for d2 in range(d + 1, max_scan + 1):
+                        sx2 = ix + scan_dir * d2
+                        if sx2 < 0 or sx2 >= img_w:
+                            break
+                        if grayscale[row, sx2] < thresh:
+                            sx_end = sx2
+                        else:
+                            break
+                    hits[idx] = (True, (sx + sx_end) / 2.0)
+                    return hits[idx]
+            hits[idx] = (False, -1.0)
+            return hits[idx]
+
+        # Phase 1: scan core points shared by ALL windows
+        for i in range(n - w, w):
+            if not scan(i)[0]:
+                return None
+
+        # Phase 2: try each window lazily
+        for start in range(n - w + 1):
+            all_found = True
+            for i in range(start, start + w):
+                if not scan(i)[0]:
+                    all_found = False
+                    break
+            if not all_found:
+                continue
+            positions = [hits[i][1] for i in range(start, start + w)]
+            line_pos = float(np.median(positions))
+            if all(abs(p - line_pos) <= tol for p in positions):
+                return line_pos
+
+        return None
+
+    # -- Text bounding snap detection --
+
+    def _detect_text_bounding_snap(
+        self,
+        rule: dict,
+        rule_index: int,
+        shape,
+        edge_index: int,
+        cursor_pos: QPointF,
+    ) -> tuple[QPointF, list[tuple[float, float]]] | None:
+        """Detect luminance change boundary and snap edge.
+
+        Scans every pixel along the edge (full coordinate scan).
+        Caches boundary detection for stability during drag.
+        Uses extreme value (min/max) to catch thin protrusions.
+        Returns (snapped_pos, detected_dots) or None.
+        """
+        from labelme.shape import Shape
+
+        d = self._TB_DEFAULTS
+        snap_range = rule.get("snap_range", d["snap_range"])
+        distance_ratio = rule.get("distance_ratio", d["distance_ratio"])
+        ref_label = rule.get("reference_label")
+
+        # Determine scan direction
+        if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+            scan_dir = -1 if edge_index == Shape.EDGE_BOTTOM else 1
+            is_horiz = True
+        elif edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+            scan_dir = 1 if edge_index == Shape.EDGE_LEFT else -1
+            is_horiz = False
+        else:
+            return None
+
+        # Check boundary cache (stable during a single drag)
+        cache = self._tb_boundary_cache
+        if (
+            cache is not None
+            and cache[0] == edge_index
+            and cache[1] == rule_index
+        ):
+            boundary_pos = cache[2]
+            agree_dots = cache[3]
+        else:
+            # Full boundary scan
+            result = self._scan_text_boundary(
+                rule, shape, edge_index, scan_dir, is_horiz, cursor_pos,
+            )
+            if result[0] is None:
+                return None
+            boundary_pos, agree_dots = result
+            # Cache for subsequent frames during this drag
+            self._tb_boundary_cache = (
+                edge_index, rule_index, boundary_pos, agree_dots,
+            )
+
+        # Snap zone check (runs every frame with current cursor_pos)
+        cursor_val = cursor_pos.y() if is_horiz else cursor_pos.x()
+
+        if ref_label is not None:
+            ref_dist = self._reference_medians.get(f"tb:{rule_index}")
+            if ref_dist is None:
+                return None
+            M = ref_dist * distance_ratio
+            snap_window = ref_dist * snap_range
+            lo = max(0.0, M - snap_window)
+            hi = M + snap_window
+            dist = abs(boundary_pos - cursor_val)
+            if lo <= dist <= hi:
+                snap_offset = boundary_pos - scan_dir * M
+                if is_horiz:
+                    return (QPointF(cursor_pos.x(), snap_offset), agree_dots)
+                else:
+                    return (QPointF(snap_offset, cursor_pos.y()), agree_dots)
+            return None
+        else:
+            if is_horiz:
+                return (QPointF(cursor_pos.x(), boundary_pos), agree_dots)
+            else:
+                return (QPointF(boundary_pos, cursor_pos.y()), agree_dots)
+
+    def _scan_text_boundary(
+        self,
+        rule: dict,
+        shape,
+        edge_index: int,
+        scan_dir: int,
+        is_horiz: bool,
+        cursor_pos: QPointF,
+    ) -> tuple[float | None, list[tuple[float, float]]]:
+        """Scan all pixels along edge to find text boundary.
+
+        Scan origin is offset outward from cursor position by scan_offset pixels,
+        ensuring base_lum is sampled from background area.
+        Uses extreme value (min/max) to catch protrusions, with median fallback.
+        Returns (boundary_pos, agree_dots) or (None, []).
+        """
+        from labelme.shape import Shape
+
+        d = self._TB_DEFAULTS
+        lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
+        min_agreement = rule.get("min_agreement", d["min_agreement"])
+        dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
+        scan_offset = rule.get("scan_offset", d["scan_offset"])
+
+        grayscale = self._grayscale_cache
+        img_h, img_w = grayscale.shape
+
+        p0, p1 = shape.points[0], shape.points[1]
+        left = min(p0.x(), p1.x())
+        right = max(p0.x(), p1.x())
+        top = min(p0.y(), p1.y())
+        bottom = max(p0.y(), p1.y())
+        max_scan = int(max(right - left, bottom - top)) + scan_offset
+
+        if is_horiz:
+            # Scan origin: cursor_y offset outward by scan_offset
+            cursor_val = cursor_pos.y()
+            iy = int(round(cursor_val - scan_dir * scan_offset))
+            xs = np.arange(int(np.ceil(left)), int(np.floor(right)) + 1)
+            if len(xs) == 0:
+                return None, []
+            iy = max(0, min(iy, img_h - 1))
+            dots = self._detect_boundary_h(
+                xs, iy, scan_dir, max_scan, grayscale, img_h, img_w, lum_thresh,
+            )
+            if len(dots) < min_agreement:
+                return None, []
+            values = [dy for _, dy in dots]
+            val_fn = lambda dx, dy: dy
+        else:
+            # Scan origin: cursor_x offset outward by scan_offset
+            cursor_val = cursor_pos.x()
+            ix = int(round(cursor_val - scan_dir * scan_offset))
+            ys = np.arange(int(np.ceil(top)), int(np.floor(bottom)) + 1)
+            if len(ys) == 0:
+                return None, []
+            ix = max(0, min(ix, img_w - 1))
+            dots = self._detect_boundary_v(
+                ys, ix, scan_dir, max_scan, grayscale, img_h, img_w, lum_thresh,
+            )
+            if len(dots) < min_agreement:
+                return None, []
+            values = [dx for dx, _ in dots]
+            val_fn = lambda dx, dy: dx
+
+        # Try extreme value first (catches thin protrusions)
+        extreme = float(np.min(values) if scan_dir > 0 else np.max(values))
+        agree = [
+            (dx, dy) for dx, dy in dots
+            if abs(val_fn(dx, dy) - extreme) <= dist_tol
+        ]
+        if len(agree) >= min_agreement:
+            return extreme, agree
+
+        # Fallback to median (main text body)
+        median_pos = float(np.median(values))
+        agree = [
+            (dx, dy) for dx, dy in dots
+            if abs(val_fn(dx, dy) - median_pos) <= dist_tol
+        ]
+        if len(agree) >= min_agreement:
+            return median_pos, agree
+
+        return None, []
+
+    def _detect_boundary_h(self, xs, iy, scan_dir, max_scan,
+                           grayscale, img_h, img_w, lum_threshold):
+        """Scan vertically from horizontal edge, detecting luminance CHANGE.
+
+        Gets base luminance at scan origin, then finds where luminance changes.
+        Handles strikethrough: if edge is on dark, dark continues → no change.
+
+        Returns list of (x_img, y_img) boundary points.
+        """
+        dots = []
+        for x in xs:
+            col = int(round(x))
+            if col < 0 or col >= img_w:
+                continue
+            if iy < 0 or iy >= img_h:
+                continue
+            base_lum = int(grayscale[iy, col])
+            for dd in range(1, max_scan + 1):
+                sy = iy + scan_dir * dd
+                if sy < 0 or sy >= img_h:
+                    break
+                if abs(int(grayscale[sy, col]) - base_lum) > lum_threshold:
+                    dots.append((float(col), float(sy)))
+                    break
+        return dots
+
+    def _detect_boundary_v(self, ys, ix, scan_dir, max_scan,
+                           grayscale, img_h, img_w, lum_threshold):
+        """Scan horizontally from vertical edge, detecting luminance CHANGE.
+
+        Returns list of (x_img, y_img) boundary points.
+        """
+        dots = []
+        for y in ys:
+            row = int(round(y))
+            if row < 0 or row >= img_h:
+                continue
+            if ix < 0 or ix >= img_w:
+                continue
+            base_lum = int(grayscale[row, ix])
+            for dd in range(1, max_scan + 1):
+                sx = ix + scan_dir * dd
+                if sx < 0 or sx >= img_w:
+                    break
+                if abs(int(grayscale[row, sx]) - base_lum) > lum_threshold:
+                    dots.append((float(sx), float(row)))
+                    break
+        return dots
 
     def boundedMoveShapes(self, shapes, pos):
         if self.outOfPixmap(pos):
@@ -1357,6 +1878,30 @@ class Canvas(QtWidgets.QWidget):
                 edge_x = max(p0.x(), p1.x())
                 cx = int(edge_x * self.scale)
                 p.drawLine(cx, 0, cx, self.height())
+
+        # Draw red snap guide line when parallel line snap is active
+        if self._snap_active and self._snap_line_pos is not None and self._edge_midpoint_dragging:
+            snap_pen = QtGui.QPen(QtGui.QColor(255, 0, 0, 80))
+            snap_pen.setWidth(4)
+            snap_pen.setStyle(Qt.DashLine)
+            p.setPen(snap_pen)
+            if self._dragging_edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                # Horizontal line at detected parallel line center (+0.5 for pixel center)
+                ly = int((self._snap_line_pos + 0.5) * self.scale)
+                p.drawLine(0, ly, self.width(), ly)
+            elif self._dragging_edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+                # Vertical line at detected parallel line center (+0.5 for pixel center)
+                lx = int((self._snap_line_pos + 0.5) * self.scale)
+                p.drawLine(lx, 0, lx, self.height())
+
+        # Draw red semi-transparent dots when text bounding snap is active
+        if self._text_bounding_snap_dots and self._edge_midpoint_dragging:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 128)))
+            for dx, dy in self._text_bounding_snap_dots:
+                sx = int((dx + 0.5) * self.scale)
+                sy = int((dy + 0.5) * self.scale)
+                p.drawEllipse(QPoint(sx, sy), 3, 3)
 
         # Draw hover label next to cursor
         # Hidden during: mouse button pressed (including vertex/edge dragging)
@@ -1709,9 +2254,19 @@ class Canvas(QtWidgets.QWidget):
 
     def loadPixmap(self, pixmap, clear_shapes=True):
         self.pixmap = pixmap
-        self._pixmap_hash = hash(
-            labelme.utils.img_qt_to_arr(img_qt=self.pixmap.toImage()).tobytes()
-        )
+        img_arr = labelme.utils.img_qt_to_arr(img_qt=self.pixmap.toImage())
+        self._pixmap_hash = hash(img_arr.tobytes())
+        # Build grayscale cache for parallel line detection
+        if img_arr.ndim == 3 and img_arr.shape[2] >= 3:
+            # Qt ARGB32 little-endian stores as BGRA
+            self._grayscale_cache = np.dot(
+                img_arr[:, :, :3].astype(np.float32),
+                [0.114, 0.587, 0.299],
+            ).astype(np.uint8)
+        elif img_arr.ndim == 2:
+            self._grayscale_cache = img_arr.astype(np.uint8)
+        else:
+            self._grayscale_cache = None
         if clear_shapes:
             self.shapes = []
         # Reset prevMovePoint to avoid out-of-bounds cursor position from previous image
@@ -1872,6 +2427,7 @@ class Canvas(QtWidgets.QWidget):
         self.restoreCursor()
         self.pixmap = QtGui.QPixmap()
         self._pixmap_hash = None
+        self._grayscale_cache: np.ndarray | None = None
         self.shapes = []
         self.shapesBackups = []
         self.shapesRedoStack = []
@@ -1888,6 +2444,8 @@ class Canvas(QtWidgets.QWidget):
         self.prevhEdge = None
         self.hEdgeMidpoint = None  # For rectangle edge midpoint hovering
         self.prevhEdgeMidpoint = None
+        self._text_bounding_snap_dots = None
+        self._tb_boundary_cache = None
         self.update()
 
 
