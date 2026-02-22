@@ -194,7 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.labelList = LabelListWidget()
         self.labelList.setStyleSheet("QListView::item { min-height: 24px; padding: 2px 0px; }")
-        self._prev_opened_dir = None
+        self._prev_opened_dir = self.settings.value("lastOpenedDir", None)
         self._initially_annotated_files: set[str] = set()
         self._current_file_row: int = -1
 
@@ -2885,6 +2885,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._can_continue():
             a0.ignore()
         self.settings.setValue("filename", self.filename if self.filename else "")
+        self.settings.setValue(
+            "lastOpenedDir", self._prev_opened_dir if self._prev_opened_dir else ""
+        )
         self.settings.setValue("window/size", self.size())
         self.settings.setValue("window/position", self.pos())
         self.settings.setValue("window/state", self.saveState())
@@ -2973,7 +2976,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_file_with_dialog(self, _value: bool = False) -> None:
         if not self._can_continue():
             return
-        path = osp.dirname(str(self.filename)) if self.filename else "."
+        if self.filename:
+            path = osp.dirname(str(self.filename))
+        elif self._prev_opened_dir and osp.exists(self._prev_opened_dir):
+            path = self._prev_opened_dir
+        else:
+            path = "."
         formats = [
             f"*.{fmt.data().decode()}"
             for fmt in QtGui.QImageReader.supportedImageFormats()
