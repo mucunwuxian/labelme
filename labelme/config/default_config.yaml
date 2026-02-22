@@ -88,11 +88,9 @@ canvas:
 #   edge_snap:
 #     parallel_line:
 #       - target_label: "notes"
-#         reference_label: "arrow"
-#         reference_side: "short"     # "short" or "long"
-#         distance_ratio: 0.80        # snap offset = ref_dist * ratio
-#         snap_range: 0.75            # trigger zone = offset ± ref_dist * range
-#         fallback_distance: 15       # used when no reference shapes exist
+#         resize_base: 2560           # letterbox resize reference (longer side)
+#         margin_pixels: 10           # margin at resize_base scale
+#         snap_range: 0.75            # trigger zone = margin ± margin * range
 #         sample_points: 11
 #         consecutive_window: 8
 #         distance_tolerance: 5

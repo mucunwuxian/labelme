@@ -1251,11 +1251,11 @@ class Canvas(QtWidgets.QWidget):
             for i, rule in enumerate(cfg.get("parallel_line", [])):
                 if self.hShape.label != rule.get("target_label"):
                     continue
-                median = self._reference_medians.get(f"pl:{i}")
-                if median is None:
+                margin = self._reference_medians.get(f"pl:{i}")
+                if margin is None:
                     continue
                 result = self._detect_parallel_line_snap(
-                    rule, median, self.hShape, self.hEdgeMidpoint, pos,
+                    rule, margin, self.hShape, self.hEdgeMidpoint, pos,
                 )
                 if result is not None:
                     snap_pos, line_pos = result
@@ -1285,8 +1285,8 @@ class Canvas(QtWidgets.QWidget):
         "consecutive_window": 8,
         "distance_tolerance": 5,
         "snap_range": 0.75,
-        "distance_ratio": 0.80,
-        "fallback_distance": 15,
+        "resize_base": 2560,
+        "margin_pixels": 10,
     }
     # -- Text bounding snap detection defaults --
     _TB_DEFAULTS = {
@@ -1302,31 +1302,30 @@ class Canvas(QtWidgets.QWidget):
     def _detect_parallel_line_snap(
         self,
         rule: dict,
-        median: float,
+        margin: float,
         shape,
         edge_index: int,
         cursor_pos: QPointF,
     ) -> tuple[QPointF, float] | None:
-        """Detect a parallel line and snap the edge to reference median distance.
+        """Detect a parallel line and snap the edge at margin distance from it.
 
+        margin is pre-computed from resize_base/margin_pixels and image size.
         Returns (snapped_pos, line_pos_in_image_coords) or None.
         """
         from labelme.shape import Shape
 
         d = self._PL_DEFAULTS
-        ratio = rule.get("distance_ratio", d["distance_ratio"])
         snap_range = rule.get("snap_range", d["snap_range"])
         sample_points = rule.get("sample_points", d["sample_points"])
         consec_window = rule.get("consecutive_window", d["consecutive_window"])
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
         dark_thresh = rule.get("dark_pixel_threshold", d["dark_pixel_threshold"])
 
-        ref_dist = median
-        M = ref_dist * ratio
-        snap_window = ref_dist * snap_range
+        M = margin
+        snap_window = M * snap_range
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
-        max_scan = max(int(ref_dist * 3), 100)
+        max_scan = max(int(M * 3), 100)
 
         p0, p1 = shape.points[0], shape.points[1]
         left = min(p0.x(), p1.x())

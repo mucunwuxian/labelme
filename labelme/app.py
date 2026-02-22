@@ -2587,24 +2587,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         cfg = self._config.get("edge_snap", {})
         medians: dict[str, float | None] = {}
-        # Parallel line rules
+        # Parallel line rules — margin from resize_base / margin_pixels
         for i, rule in enumerate(cfg.get("parallel_line", [])):
-            ref_label = rule.get("reference_label")
-            if ref_label is None:
-                continue
-            fallback = rule.get("fallback_distance", 15)
-            ref_side = rule.get("reference_side", "short")
-            sides: list[float] = []
-            for shape in self.canvas.shapes:
-                if shape.label == ref_label:
-                    rect = shape.boundingRect()
-                    if ref_side == "short":
-                        sides.append(min(rect.width(), rect.height()))
-                    else:
-                        sides.append(max(rect.width(), rect.height()))
-            medians[f"pl:{i}"] = (
-                float(np.median(sides)) if sides else fallback
-            )
+            resize_base = rule.get("resize_base", 2560)
+            margin_px = rule.get("margin_pixels", 10)
+            if self.canvas.pixmap is not None:
+                img_w = self.canvas.pixmap.width()
+                img_h = self.canvas.pixmap.height()
+                scale = max(img_w, img_h) / resize_base
+                medians[f"pl:{i}"] = margin_px * scale
+            else:
+                medians[f"pl:{i}"] = float(margin_px)
         # Text bounding rules
         for i, rule in enumerate(cfg.get("text_bounding", [])):
             ref_label = rule.get("reference_label")
