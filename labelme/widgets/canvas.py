@@ -1389,26 +1389,25 @@ class Canvas(QtWidgets.QWidget):
                        consec_window, dist_tol, dark_thresh):
         """Detect parallel line by scanning vertically from horizontal edge samples.
 
-        Uses cascade early termination: scans core points (shared by all
-        consecutive windows) first, aborting immediately if any core point
-        misses. Then tries each window lazily.
+        Scans all sample points upfront, then slides a window looking for
+        sufficient agreement.  Allows up to 2 misses per window to tolerate
+        noise, text crossing the line, etc.
 
         Returns absolute y position of detected line center, or None.
         """
         n = len(xs)
-        w = consec_window
+        w = min(consec_window, n)
         tol = dist_tol
         thresh = dark_thresh
-        hits = [None] * n  # None = not yet scanned
+        hits: list[tuple[bool, float]] = []
 
-        def scan(idx):
-            if hits[idx] is not None:
-                return hits[idx]
+        for idx in range(n):
             x = xs[idx]
             col = int(round(x))
             if col < 0 or col >= img_w:
-                hits[idx] = (False, -1.0)
-                return hits[idx]
+                hits.append((False, -1.0))
+                continue
+            found = False
             for d in range(1, max_scan + 1):
                 sy = iy + scan_dir * d
                 if sy < 0 or sy >= img_h:
@@ -1423,30 +1422,23 @@ class Canvas(QtWidgets.QWidget):
                             sy_end = sy2
                         else:
                             break
-                    hits[idx] = (True, (sy + sy_end) / 2.0)
-                    return hits[idx]
-            hits[idx] = (False, -1.0)
-            return hits[idx]
-
-        # Phase 1: scan core points shared by ALL windows (indices n-w .. w-1)
-        # For n=11, w=8: core = indices 3,4,5,6,7
-        for i in range(n - w, w):
-            if not scan(i)[0]:
-                return None  # no window can succeed
-
-        # Phase 2: try each window, scanning remaining edge points lazily
-        for start in range(n - w + 1):
-            all_found = True
-            for i in range(start, start + w):
-                if not scan(i)[0]:
-                    all_found = False
+                    hits.append((True, (sy + sy_end) / 2.0))
+                    found = True
                     break
-            if not all_found:
+            if not found:
+                hits.append((False, -1.0))
+
+        # Slide window: require at least (w - 2) hits that agree on position
+        min_hits = max(w - 2, (w + 1) // 2)
+        for start in range(max(n - w + 1, 1)):
+            end = min(start + w, n)
+            found_positions = [hits[i][1] for i in range(start, end) if hits[i][0]]
+            if len(found_positions) < min_hits:
                 continue
-            positions = [hits[i][1] for i in range(start, start + w)]
-            line_pos = float(np.median(positions))
-            if all(abs(p - line_pos) <= tol for p in positions):
-                return line_pos
+            line_pos = float(np.median(found_positions))
+            agrees = [p for p in found_positions if abs(p - line_pos) <= tol]
+            if len(agrees) >= min_hits:
+                return float(np.median(agrees))
 
         return None
 
@@ -1454,24 +1446,23 @@ class Canvas(QtWidgets.QWidget):
                        consec_window, dist_tol, dark_thresh):
         """Detect parallel line by scanning horizontally from vertical edge samples.
 
-        Uses cascade early termination (same logic as _detect_line_h).
+        Same tolerance logic as _detect_line_h (allows up to 2 misses per window).
 
         Returns absolute x position of detected line center, or None.
         """
         n = len(ys)
-        w = consec_window
+        w = min(consec_window, n)
         tol = dist_tol
         thresh = dark_thresh
-        hits = [None] * n
+        hits: list[tuple[bool, float]] = []
 
-        def scan(idx):
-            if hits[idx] is not None:
-                return hits[idx]
+        for idx in range(n):
             y = ys[idx]
             row = int(round(y))
             if row < 0 or row >= img_h:
-                hits[idx] = (False, -1.0)
-                return hits[idx]
+                hits.append((False, -1.0))
+                continue
+            found = False
             for d in range(1, max_scan + 1):
                 sx = ix + scan_dir * d
                 if sx < 0 or sx >= img_w:
@@ -1486,29 +1477,23 @@ class Canvas(QtWidgets.QWidget):
                             sx_end = sx2
                         else:
                             break
-                    hits[idx] = (True, (sx + sx_end) / 2.0)
-                    return hits[idx]
-            hits[idx] = (False, -1.0)
-            return hits[idx]
-
-        # Phase 1: scan core points shared by ALL windows
-        for i in range(n - w, w):
-            if not scan(i)[0]:
-                return None
-
-        # Phase 2: try each window lazily
-        for start in range(n - w + 1):
-            all_found = True
-            for i in range(start, start + w):
-                if not scan(i)[0]:
-                    all_found = False
+                    hits.append((True, (sx + sx_end) / 2.0))
+                    found = True
                     break
-            if not all_found:
+            if not found:
+                hits.append((False, -1.0))
+
+        # Slide window: require at least (w - 2) hits that agree on position
+        min_hits = max(w - 2, (w + 1) // 2)
+        for start in range(max(n - w + 1, 1)):
+            end = min(start + w, n)
+            found_positions = [hits[i][1] for i in range(start, end) if hits[i][0]]
+            if len(found_positions) < min_hits:
                 continue
-            positions = [hits[i][1] for i in range(start, start + w)]
-            line_pos = float(np.median(positions))
-            if all(abs(p - line_pos) <= tol for p in positions):
-                return line_pos
+            line_pos = float(np.median(found_positions))
+            agrees = [p for p in found_positions if abs(p - line_pos) <= tol]
+            if len(agrees) >= min_hits:
+                return float(np.median(agrees))
 
         return None
 
