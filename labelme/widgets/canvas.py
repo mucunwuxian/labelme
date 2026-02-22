@@ -1295,7 +1295,8 @@ class Canvas(QtWidgets.QWidget):
         "distance_tolerance": 5,
         "snap_range": 0.75,
         "distance_ratio": 0.05,
-        "fallback_distance": 15,
+        "resize_base": 2560,
+        "margin_pixels": 8,
         "scan_offset": 0,
     }
 
@@ -1533,7 +1534,6 @@ class Canvas(QtWidgets.QWidget):
         d = self._TB_DEFAULTS
         snap_range = rule.get("snap_range", d["snap_range"])
         distance_ratio = rule.get("distance_ratio", d["distance_ratio"])
-        ref_label = rule.get("reference_label")
 
         # Determine scan direction
         if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
@@ -1569,28 +1569,21 @@ class Canvas(QtWidgets.QWidget):
 
         # Snap zone check (runs every frame with current cursor_pos)
         cursor_val = cursor_pos.y() if is_horiz else cursor_pos.x()
-
-        if ref_label is not None:
-            ref_dist = self._reference_medians.get(f"tb:{rule_index}")
-            if ref_dist is None:
-                return None
-            M = ref_dist * distance_ratio
-            snap_window = ref_dist * snap_range
-            lo = max(0.0, M - snap_window)
-            hi = M + snap_window
-            dist = abs(boundary_pos - cursor_val)
-            if lo <= dist <= hi:
-                snap_offset = boundary_pos - scan_dir * M
-                if is_horiz:
-                    return (QPointF(cursor_pos.x(), snap_offset), agree_dots)
-                else:
-                    return (QPointF(snap_offset, cursor_pos.y()), agree_dots)
+        ref_dist = self._reference_medians.get(f"tb:{rule_index}")
+        if ref_dist is None:
             return None
-        else:
+        M = ref_dist * distance_ratio
+        snap_window = ref_dist * snap_range
+        lo = max(0.0, M - snap_window)
+        hi = M + snap_window
+        dist = abs(boundary_pos - cursor_val)
+        if lo <= dist <= hi:
+            snap_offset = boundary_pos - scan_dir * M
             if is_horiz:
-                return (QPointF(cursor_pos.x(), boundary_pos), agree_dots)
+                return (QPointF(cursor_pos.x(), snap_offset), agree_dots)
             else:
-                return (QPointF(boundary_pos, cursor_pos.y()), agree_dots)
+                return (QPointF(snap_offset, cursor_pos.y()), agree_dots)
+        return None
 
     def _scan_text_boundary(
         self,
