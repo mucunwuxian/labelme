@@ -194,7 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.labelList = LabelListWidget()
         self.labelList.setStyleSheet("QListView::item { min-height: 24px; padding: 2px 0px; }")
-        self._prev_opened_dir = self.settings.value("lastOpenedDir", None)
+        self._prev_opened_dir = None
         self._initially_annotated_files: set[str] = set()
         self._current_file_row: int = -1
 
@@ -1268,6 +1268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # XXX: Could be completely declarative.
         # Restore application settings.
         self.settings = QtCore.QSettings("labelme", "labelme")
+        self._prev_opened_dir = self.settings.value("lastOpenedDir", None) or None
         self.recentFiles = self.settings.value("recentFiles", []) or []
         size = self.settings.value("window/size", QtCore.QSize(900, 500))
         position = self.settings.value("window/position", QtCore.QPoint(0, 0))
