@@ -1944,6 +1944,7 @@ class MainWindow(QtWidgets.QMainWindow):
             filename = self.imageList[currIndex]
             if filename:
                 self._load_file(filename)
+        self._update_nav_button_state()
 
     # React to canvas signals.
     def shapeSelectionChanged(self, selected_shapes):
@@ -2956,6 +2957,7 @@ class MainWindow(QtWidgets.QMainWindow):
         logger.debug("setting current row to {:d}", row_prev)
         self.fileListWidget.setCurrentRow(row_prev)
         self.fileListWidget.repaint()
+        self._update_nav_button_state()
 
     def _open_next_image(self, _value=False) -> None:
         row_next: int = self.fileListWidget.currentRow() + 1
@@ -2966,6 +2968,13 @@ class MainWindow(QtWidgets.QMainWindow):
         logger.debug("setting current row to {:d}", row_next)
         self.fileListWidget.setCurrentRow(row_next)
         self.fileListWidget.repaint()
+        self._update_nav_button_state()
+
+    def _update_nav_button_state(self) -> None:
+        row = self.fileListWidget.currentRow()
+        count = self.fileListWidget.count()
+        self.actions.openPrevImg.setEnabled(row > 0)
+        self.actions.openNextImg.setEnabled(row < count - 1)
 
     def _open_file_with_dialog(self, _value: bool = False) -> None:
         if not self._can_continue():
@@ -3676,17 +3685,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setFileItemAnnotated(item, is_annotated)
             self.fileListWidget.addItem(item)
 
-        if len(self.imageList) > 1:
-            self.actions.openNextImg.setEnabled(True)
-            self.actions.openPrevImg.setEnabled(True)
-
         self._open_next_image()
 
     def _import_images_from_dir(
         self, root_dir: str | None, pattern: str | None = None
     ) -> None:
-        self.actions.openNextImg.setEnabled(True)
-        self.actions.openPrevImg.setEnabled(True)
 
         if not self._can_continue() or not root_dir:
             return
@@ -3749,6 +3752,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Enable export when files are loaded
         self.actions.exportFileList.setEnabled(self.fileListWidget.count() > 0)
         self.actions.progressStats.setEnabled(self.fileListWidget.count() > 0)
+        self._update_nav_button_state()
 
     def _update_status_stats(self, mouse_pos: QtCore.QPointF) -> None:
         stats: list[str] = []

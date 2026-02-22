@@ -1283,7 +1283,7 @@ class Canvas(QtWidgets.QWidget):
         "dark_pixel_threshold": 128,
         "sample_points": 11,
         "consecutive_window": 8,
-        "distance_tolerance": 5,
+        "distance_tolerance": 0.5,
         "snap_range": 0.75,
         "resize_base": 2560,
         "margin_pixels": 10,
@@ -1349,15 +1349,20 @@ class Canvas(QtWidgets.QWidget):
             if iy < 0 or iy >= img_h:
                 return None
 
-            line_pos = self._detect_line_h(
+            result = self._detect_line_h(
                 xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
                 consec_window, dist_tol, dark_thresh,
             )
-            if line_pos is not None:
-                dist = abs(line_pos - cursor_pos.y())
+            if result is not None:
+                near_edge, center = result
+                # Convert from pixel-index space to image coordinate space
+                # (pixel values are sampled at pixel centers = index + 0.5)
+                near_edge_img = near_edge + 0.5
+                center_img = center + 0.5
+                dist = abs(near_edge_img - cursor_pos.y())
                 if lo <= dist <= hi:
-                    snapped_y = line_pos - scan_dir * M
-                    return (QPointF(cursor_pos.x(), snapped_y), line_pos)
+                    snapped_y = near_edge_img - scan_dir * M
+                    return (QPointF(cursor_pos.x(), snapped_y), center_img)
             return None
 
         elif edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
@@ -1372,15 +1377,19 @@ class Canvas(QtWidgets.QWidget):
             if ix < 0 or ix >= img_w:
                 return None
 
-            line_pos = self._detect_line_v(
+            result = self._detect_line_v(
                 ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
                 consec_window, dist_tol, dark_thresh,
             )
-            if line_pos is not None:
-                dist = abs(line_pos - cursor_pos.x())
+            if result is not None:
+                near_edge, center = result
+                # Convert from pixel-index space to image coordinate space
+                near_edge_img = near_edge + 0.5
+                center_img = center + 0.5
+                dist = abs(near_edge_img - cursor_pos.x())
                 if lo <= dist <= hi:
-                    snapped_x = line_pos - scan_dir * M
-                    return (QPointF(snapped_x, cursor_pos.y()), line_pos)
+                    snapped_x = near_edge_img - scan_dir * M
+                    return (QPointF(snapped_x, cursor_pos.y()), center_img)
             return None
 
         return None
@@ -1393,19 +1402,22 @@ class Canvas(QtWidgets.QWidget):
         sufficient agreement.  Allows up to 2 misses per window to tolerate
         noise, text crossing the line, etc.
 
-        Returns absolute y position of detected line center, or None.
+        Returns (near_edge, center) tuple or None.
+        near_edge: for snap calculation (margin measured from line edge).
+        center: for guide line display (visual center of dark band).
         """
         n = len(xs)
         w = min(consec_window, n)
         tol = dist_tol
         thresh = dark_thresh
-        hits: list[tuple[bool, float]] = []
+        # Each hit stores (found, near_edge, center)
+        hits: list[tuple[bool, float, float]] = []
 
         for idx in range(n):
             x = xs[idx]
             col = int(round(x))
             if col < 0 or col >= img_w:
-                hits.append((False, -1.0))
+                hits.append((False, -1.0, -1.0))
                 continue
             found = False
             for d in range(1, max_scan + 1):
@@ -1413,6 +1425,16 @@ class Canvas(QtWidgets.QWidget):
                 if sy < 0 or sy >= img_h:
                     break
                 if grayscale[sy, col] < thresh:
+                    # Sub-pixel near edge (closest to rectangle edge)
+                    y_prev = iy + scan_dir * (d - 1)
+                    v_prev = float(grayscale[y_prev, col])
+                    v_dark = float(grayscale[sy, col])
+                    dv = v_dark - v_prev
+                    if dv != 0:
+                        refined_near = y_prev + scan_dir * (thresh - v_prev) / dv
+                    else:
+                        refined_near = float(sy)
+                    # Find band end for center calculation
                     sy_end = sy
                     for d2 in range(d + 1, max_scan + 1):
                         sy2 = iy + scan_dir * d2
@@ -1422,23 +1444,38 @@ class Canvas(QtWidgets.QWidget):
                             sy_end = sy2
                         else:
                             break
-                    hits.append((True, (sy + sy_end) / 2.0))
+                    # Sub-pixel far edge
+                    y_after = sy_end + scan_dir
+                    if 0 <= y_after < img_h and grayscale[y_after, col] >= thresh:
+                        v_last = float(grayscale[sy_end, col])
+                        v_after = float(grayscale[y_after, col])
+                        dv2 = v_after - v_last
+                        if dv2 != 0:
+                            refined_far = sy_end + scan_dir * (thresh - v_last) / dv2
+                        else:
+                            refined_far = float(sy_end)
+                    else:
+                        refined_far = float(sy_end)
+                    hits.append((True, refined_near, (refined_near + refined_far) / 2.0))
                     found = True
                     break
             if not found:
-                hits.append((False, -1.0))
+                hits.append((False, -1.0, -1.0))
 
-        # Slide window: require at least (w - 2) hits that agree on position
-        min_hits = max(w - 2, (w + 1) // 2)
+        # Slide window: require at least (w - 1) hits that agree on near_edge
+        min_hits = max(w - 1, (w + 1) // 2)
         for start in range(max(n - w + 1, 1)):
             end = min(start + w, n)
-            found_positions = [hits[i][1] for i in range(start, end) if hits[i][0]]
-            if len(found_positions) < min_hits:
+            window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+            if len(window) < min_hits:
                 continue
-            line_pos = float(np.median(found_positions))
-            agrees = [p for p in found_positions if abs(p - line_pos) <= tol]
-            if len(agrees) >= min_hits:
-                return float(np.median(agrees))
+            near_positions = [ne for ne, _ in window]
+            median_near = float(np.median(near_positions))
+            agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= tol]
+            if len(agree_idx) >= min_hits:
+                near_edge = float(np.median([near_positions[j] for j in agree_idx]))
+                center = float(np.median([window[j][1] for j in agree_idx]))
+                return (near_edge, center)
 
         return None
 
@@ -1448,19 +1485,19 @@ class Canvas(QtWidgets.QWidget):
 
         Same tolerance logic as _detect_line_h (allows up to 2 misses per window).
 
-        Returns absolute x position of detected line center, or None.
+        Returns (near_edge, center) tuple or None.
         """
         n = len(ys)
         w = min(consec_window, n)
         tol = dist_tol
         thresh = dark_thresh
-        hits: list[tuple[bool, float]] = []
+        hits: list[tuple[bool, float, float]] = []
 
         for idx in range(n):
             y = ys[idx]
             row = int(round(y))
             if row < 0 or row >= img_h:
-                hits.append((False, -1.0))
+                hits.append((False, -1.0, -1.0))
                 continue
             found = False
             for d in range(1, max_scan + 1):
@@ -1468,6 +1505,16 @@ class Canvas(QtWidgets.QWidget):
                 if sx < 0 or sx >= img_w:
                     break
                 if grayscale[row, sx] < thresh:
+                    # Sub-pixel near edge
+                    x_prev = ix + scan_dir * (d - 1)
+                    v_prev = float(grayscale[row, x_prev])
+                    v_dark = float(grayscale[row, sx])
+                    dv = v_dark - v_prev
+                    if dv != 0:
+                        refined_near = x_prev + scan_dir * (thresh - v_prev) / dv
+                    else:
+                        refined_near = float(sx)
+                    # Find band end for center
                     sx_end = sx
                     for d2 in range(d + 1, max_scan + 1):
                         sx2 = ix + scan_dir * d2
@@ -1477,23 +1524,38 @@ class Canvas(QtWidgets.QWidget):
                             sx_end = sx2
                         else:
                             break
-                    hits.append((True, (sx + sx_end) / 2.0))
+                    # Sub-pixel far edge
+                    x_after = sx_end + scan_dir
+                    if 0 <= x_after < img_w and grayscale[row, x_after] >= thresh:
+                        v_last = float(grayscale[row, sx_end])
+                        v_after = float(grayscale[row, x_after])
+                        dv2 = v_after - v_last
+                        if dv2 != 0:
+                            refined_far = sx_end + scan_dir * (thresh - v_last) / dv2
+                        else:
+                            refined_far = float(sx_end)
+                    else:
+                        refined_far = float(sx_end)
+                    hits.append((True, refined_near, (refined_near + refined_far) / 2.0))
                     found = True
                     break
             if not found:
-                hits.append((False, -1.0))
+                hits.append((False, -1.0, -1.0))
 
-        # Slide window: require at least (w - 2) hits that agree on position
-        min_hits = max(w - 2, (w + 1) // 2)
+        # Slide window: require at least (w - 1) hits that agree on near_edge
+        min_hits = max(w - 1, (w + 1) // 2)
         for start in range(max(n - w + 1, 1)):
             end = min(start + w, n)
-            found_positions = [hits[i][1] for i in range(start, end) if hits[i][0]]
-            if len(found_positions) < min_hits:
+            window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+            if len(window) < min_hits:
                 continue
-            line_pos = float(np.median(found_positions))
-            agrees = [p for p in found_positions if abs(p - line_pos) <= tol]
-            if len(agrees) >= min_hits:
-                return float(np.median(agrees))
+            near_positions = [ne for ne, _ in window]
+            median_near = float(np.median(near_positions))
+            agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= tol]
+            if len(agree_idx) >= min_hits:
+                near_edge = float(np.median([near_positions[j] for j in agree_idx]))
+                center = float(np.median([window[j][1] for j in agree_idx]))
+                return (near_edge, center)
 
         return None
 
@@ -1552,6 +1614,10 @@ class Canvas(QtWidgets.QWidget):
                 edge_index, rule_index, boundary_pos, agree_dots,
             )
 
+        # Convert boundary_pos from pixel-index space to image coordinate space
+        # (pixel values are sampled at pixel centers = index + 0.5)
+        boundary_img = boundary_pos + 0.5
+
         # Snap zone check (runs every frame with current cursor_pos)
         cursor_val = cursor_pos.y() if is_horiz else cursor_pos.x()
         ref_dist = self._reference_medians.get(f"tb:{rule_index}")
@@ -1561,9 +1627,9 @@ class Canvas(QtWidgets.QWidget):
         snap_window = ref_dist * snap_range
         lo = max(0.0, M - snap_window)
         hi = M + snap_window
-        dist = abs(boundary_pos - cursor_val)
+        dist = abs(boundary_img - cursor_val)
         if lo <= dist <= hi:
-            snap_offset = boundary_pos - scan_dir * M
+            snap_offset = boundary_img - scan_dir * M
             if is_horiz:
                 return (QPointF(cursor_pos.x(), snap_offset), agree_dots)
             else:
@@ -1635,23 +1701,19 @@ class Canvas(QtWidgets.QWidget):
             values = [dx for dx, _ in dots]
             val_fn = lambda dx, dy: dx
 
-        # Try extreme value first (catches thin protrusions)
-        extreme = float(np.min(values) if scan_dir > 0 else np.max(values))
-        agree = [
-            (dx, dy) for dx, dy in dots
-            if abs(val_fn(dx, dy) - extreme) <= dist_tol
-        ]
-        if len(agree) >= min_agreement:
-            return extreme, agree
+        # Fixed percentile: biased toward protrusions while ignoring noise.
+        # 5th percentile for scan_dir>0 (min side), 95th for scan_dir<0 (max side).
+        if scan_dir > 0:
+            boundary_pos = float(np.percentile(values, 5))
+        else:
+            boundary_pos = float(np.percentile(values, 95))
 
-        # Fallback to median (main text body)
-        median_pos = float(np.median(values))
         agree = [
             (dx, dy) for dx, dy in dots
-            if abs(val_fn(dx, dy) - median_pos) <= dist_tol
+            if abs(val_fn(dx, dy) - boundary_pos) <= dist_tol
         ]
         if len(agree) >= min_agreement:
-            return median_pos, agree
+            return boundary_pos, agree
 
         return None, []
 
@@ -1659,50 +1721,99 @@ class Canvas(QtWidgets.QWidget):
                            grayscale, img_h, img_w, lum_threshold):
         """Scan vertically from horizontal edge, detecting luminance CHANGE.
 
-        Gets base luminance at scan origin, then finds where luminance changes.
-        Handles strikethrough: if edge is on dark, dark continues → no change.
+        Vectorized numpy implementation: extracts a 2D slice of all scan
+        columns at once, computes diffs, finds threshold crossings, and
+        interpolates for sub-pixel precision.
 
         Returns list of (x_img, y_img) boundary points.
         """
-        dots = []
-        for x in xs:
-            col = int(round(x))
-            if col < 0 or col >= img_w:
-                continue
-            if iy < 0 or iy >= img_h:
-                continue
-            base_lum = int(grayscale[iy, col])
-            for dd in range(1, max_scan + 1):
-                sy = iy + scan_dir * dd
-                if sy < 0 or sy >= img_h:
-                    break
-                if abs(int(grayscale[sy, col]) - base_lum) > lum_threshold:
-                    dots.append((float(col), float(sy)))
-                    break
-        return dots
+        if iy < 0 or iy >= img_h:
+            return []
+        cols = np.array([int(round(x)) for x in xs], dtype=int)
+        mask = (cols >= 0) & (cols < img_w)
+        cols = cols[mask]
+        if len(cols) == 0:
+            return []
+
+        base_lums = grayscale[iy, cols].astype(float)
+
+        if scan_dir > 0:
+            scan_ys = np.arange(iy + 1, min(iy + max_scan + 1, img_h))
+        else:
+            scan_ys = np.arange(iy - 1, max(iy - max_scan - 1, -1), -1)
+        if len(scan_ys) == 0:
+            return []
+
+        # 2D slice: (num_scan_rows, num_cols)
+        vals = grayscale[scan_ys[:, np.newaxis], cols[np.newaxis, :]].astype(float)
+        diffs = np.abs(vals - base_lums[np.newaxis, :])
+
+        crossed = diffs > lum_threshold
+        first_idx = np.argmax(crossed, axis=0)
+        has_hit = crossed[first_idx, np.arange(len(cols))]
+
+        valid = np.where(has_hit)[0]
+        if len(valid) == 0:
+            return []
+
+        idx = first_idx[valid]
+        d_curr = diffs[idx, valid]
+        prev_idx = np.maximum(idx - 1, 0)
+        d_prev = np.where(idx > 0, diffs[prev_idx, valid], 0.0)
+        denom = d_curr - d_prev
+        frac = np.where(denom > 0, (lum_threshold - d_prev) / denom, 0.0)
+        prev_y = np.where(idx > 0, scan_ys[prev_idx].astype(float), float(iy))
+        refined_y = prev_y + scan_dir * frac
+
+        return list(zip(cols[valid].astype(float).tolist(), refined_y.tolist()))
 
     def _detect_boundary_v(self, ys, ix, scan_dir, max_scan,
                            grayscale, img_h, img_w, lum_threshold):
         """Scan horizontally from vertical edge, detecting luminance CHANGE.
 
+        Vectorized numpy implementation with sub-pixel interpolation.
+
         Returns list of (x_img, y_img) boundary points.
         """
-        dots = []
-        for y in ys:
-            row = int(round(y))
-            if row < 0 or row >= img_h:
-                continue
-            if ix < 0 or ix >= img_w:
-                continue
-            base_lum = int(grayscale[row, ix])
-            for dd in range(1, max_scan + 1):
-                sx = ix + scan_dir * dd
-                if sx < 0 or sx >= img_w:
-                    break
-                if abs(int(grayscale[row, sx]) - base_lum) > lum_threshold:
-                    dots.append((float(sx), float(row)))
-                    break
-        return dots
+        if ix < 0 or ix >= img_w:
+            return []
+        rows = np.array([int(round(y)) for y in ys], dtype=int)
+        mask = (rows >= 0) & (rows < img_h)
+        rows = rows[mask]
+        if len(rows) == 0:
+            return []
+
+        base_lums = grayscale[rows, ix].astype(float)
+
+        if scan_dir > 0:
+            scan_xs = np.arange(ix + 1, min(ix + max_scan + 1, img_w))
+        else:
+            scan_xs = np.arange(ix - 1, max(ix - max_scan - 1, -1), -1)
+        if len(scan_xs) == 0:
+            return []
+
+        # 2D slice: (num_rows, num_scan_cols)
+        vals = grayscale[rows[:, np.newaxis], scan_xs[np.newaxis, :]].astype(float)
+        diffs = np.abs(vals - base_lums[:, np.newaxis])
+
+        crossed = diffs > lum_threshold
+        first_idx = np.argmax(crossed, axis=1)
+        has_hit = crossed[np.arange(len(rows)), first_idx]
+
+        valid = np.where(has_hit)[0]
+        if len(valid) == 0:
+            return []
+
+        idx = first_idx[valid]
+        d_curr = diffs[valid, idx]
+        prev_idx = np.maximum(idx - 1, 0)
+        d_prev = np.where(idx > 0, diffs[valid, prev_idx], 0.0)
+        denom = d_curr - d_prev
+        frac = np.where(denom > 0, (lum_threshold - d_prev) / denom, 0.0)
+        prev_x = np.where(idx > 0, scan_xs[prev_idx].astype(float), float(ix))
+        refined_x = prev_x + scan_dir * frac
+
+        return list(zip(refined_x.tolist(), rows[valid].astype(float).tolist()))
 
     def boundedMoveShapes(self, shapes, pos):
         if self.outOfPixmap(pos):
@@ -1841,20 +1952,20 @@ class Canvas(QtWidgets.QWidget):
             # Note: painter still has offset transform, so just multiply by scale
             if self._dragging_edge_index == Shape.EDGE_TOP:
                 edge_y = min(p0.y(), p1.y())
-                cy = int(edge_y * self.scale)
-                p.drawLine(0, cy, self.width(), cy)
+                cy = edge_y * self.scale
+                p.drawLine(QPointF(0, cy), QPointF(self.width(), cy))
             elif self._dragging_edge_index == Shape.EDGE_BOTTOM:
                 edge_y = max(p0.y(), p1.y())
-                cy = int(edge_y * self.scale)
-                p.drawLine(0, cy, self.width(), cy)
+                cy = edge_y * self.scale
+                p.drawLine(QPointF(0, cy), QPointF(self.width(), cy))
             elif self._dragging_edge_index == Shape.EDGE_LEFT:
                 edge_x = min(p0.x(), p1.x())
-                cx = int(edge_x * self.scale)
-                p.drawLine(cx, 0, cx, self.height())
+                cx = edge_x * self.scale
+                p.drawLine(QPointF(cx, 0), QPointF(cx, self.height()))
             elif self._dragging_edge_index == Shape.EDGE_RIGHT:
                 edge_x = max(p0.x(), p1.x())
-                cx = int(edge_x * self.scale)
-                p.drawLine(cx, 0, cx, self.height())
+                cx = edge_x * self.scale
+                p.drawLine(QPointF(cx, 0), QPointF(cx, self.height()))
 
         # Draw red snap guide line when parallel line snap is active
         if self._snap_active and self._snap_line_pos is not None and self._edge_midpoint_dragging:
@@ -1863,22 +1974,22 @@ class Canvas(QtWidgets.QWidget):
             snap_pen.setStyle(Qt.DashLine)
             p.setPen(snap_pen)
             if self._dragging_edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
-                # Horizontal line at detected parallel line center (+0.5 for pixel center)
-                ly = int((self._snap_line_pos + 0.5) * self.scale)
-                p.drawLine(0, ly, self.width(), ly)
+                # Horizontal line at detected parallel line center (already in image space)
+                ly = self._snap_line_pos * self.scale
+                p.drawLine(QPointF(0, ly), QPointF(self.width(), ly))
             elif self._dragging_edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
-                # Vertical line at detected parallel line center (+0.5 for pixel center)
-                lx = int((self._snap_line_pos + 0.5) * self.scale)
-                p.drawLine(lx, 0, lx, self.height())
+                # Vertical line at detected parallel line center (already in image space)
+                lx = self._snap_line_pos * self.scale
+                p.drawLine(QPointF(lx, 0), QPointF(lx, self.height()))
 
         # Draw red semi-transparent dots when text bounding snap is active
         if self._text_bounding_snap_dots and self._edge_midpoint_dragging:
             p.setPen(Qt.NoPen)
             p.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 128)))
             for dx, dy in self._text_bounding_snap_dots:
-                sx = int((dx + 0.5) * self.scale)
-                sy = int((dy + 0.5) * self.scale)
-                p.drawEllipse(QPoint(sx, sy), 3, 3)
+                sx = (dx + 0.5) * self.scale
+                sy = (dy + 0.5) * self.scale
+                p.drawEllipse(QPointF(sx, sy), 3.0, 3.0)
 
         # Draw hover label next to cursor
         # Hidden during: mouse button pressed (including vertex/edge dragging)

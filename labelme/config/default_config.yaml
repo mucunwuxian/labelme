@@ -119,8 +119,8 @@ shortcuts:
   save_to: null
   delete_file: Ctrl+Delete
 
-  open_next: [D, Ctrl+Shift+D]
-  open_prev: [A, Ctrl+Shift+A]
+  open_next: [D, Ctrl+Shift+D, Ctrl+Right]
+  open_prev: [A, Ctrl+Shift+A, Ctrl+Left]
 
   zoom_in: [Ctrl++, Ctrl+=]
   zoom_out: Ctrl+-
