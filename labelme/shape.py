@@ -456,6 +456,9 @@ class Shape:
     def nearestEdgeMidpoint(self, point, epsilon):
         """Find the nearest edge midpoint for rectangle shapes.
         Returns edge index (EDGE_TOP, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT) or None.
+
+        Uses an elongated hit area matching the capsule shape:
+        wider along the edge direction, narrower perpendicular to it.
         """
         if self.shape_type != "rectangle" or len(self.points) != 2:
             return None
@@ -472,8 +475,9 @@ class Shape:
             return None
 
         point_scaled = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
-        min_distance = float("inf")
-        min_edge = None
+        # Hit area: along edge = half of edge length (capped), perpendicular = epsilon * 2
+        hit_along = epsilon * 4
+        hit_perp = epsilon * 2
 
         edge_map = {
             "top": self.EDGE_TOP,
@@ -481,11 +485,26 @@ class Shape:
             "left": self.EDGE_LEFT,
             "right": self.EDGE_RIGHT,
         }
+        horiz_edges = {"top", "bottom"}
+
+        min_distance = float("inf")
+        min_edge = None
 
         for edge_name, midpoint in midpoints.items():
             mp_scaled = QtCore.QPointF(midpoint.x() * self.scale, midpoint.y() * self.scale)
-            dist = labelme.utils.distance(mp_scaled - point_scaled)
-            if dist <= epsilon and dist < min_distance:
+            dx = abs(point_scaled.x() - mp_scaled.x())
+            dy = abs(point_scaled.y() - mp_scaled.y())
+            if edge_name in horiz_edges:
+                if dx <= hit_along and dy <= hit_perp:
+                    dist = dy
+                else:
+                    continue
+            else:
+                if dy <= hit_along and dx <= hit_perp:
+                    dist = dx
+                else:
+                    continue
+            if dist < min_distance:
                 min_distance = dist
                 min_edge = edge_map[edge_name]
 

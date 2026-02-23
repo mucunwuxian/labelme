@@ -1701,21 +1701,24 @@ class Canvas(QtWidgets.QWidget):
             values = [dx for dx, _ in dots]
             val_fn = lambda dx, dy: dx
 
-        # Fixed percentile: biased toward protrusions while ignoring noise.
-        # 5th percentile for scan_dir>0 (min side), 95th for scan_dir<0 (max side).
-        if scan_dir > 0:
-            boundary_pos = float(np.percentile(values, 5))
-        else:
-            boundary_pos = float(np.percentile(values, 95))
-
-        agree = [
-            (dx, dy) for dx, dy in dots
-            if abs(val_fn(dx, dy) - boundary_pos) <= dist_tol
+        # Noise removal: discard dots far from median
+        median_val = float(np.median(values))
+        noise_range = dist_tol * 3
+        clean = [
+            (dx, dy) for (dx, dy), v in zip(dots, values)
+            if abs(v - median_val) <= noise_range
         ]
-        if len(agree) >= min_agreement:
-            return boundary_pos, agree
+        if len(clean) < min_agreement:
+            return None, []
 
-        return None, []
+        # Boundary = extreme of cleaned dots (catches protrusions)
+        clean_vals = [val_fn(dx, dy) for dx, dy in clean]
+        if scan_dir > 0:
+            boundary_pos = float(min(clean_vals))
+        else:
+            boundary_pos = float(max(clean_vals))
+
+        return boundary_pos, clean
 
     def _detect_boundary_h(self, xs, iy, scan_dir, max_scan,
                            grayscale, img_h, img_w, lum_threshold):
