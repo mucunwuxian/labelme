@@ -104,7 +104,6 @@ canvas:
 #         luminance_threshold: 30
 #         min_agreement: 6
 #         distance_tolerance: 5
-#         scan_offset: 0              # scan origin offset from cursor (pixels)
 edge_snap:
   parallel_line: []
   text_bounding: []

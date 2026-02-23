@@ -1297,7 +1297,6 @@ class Canvas(QtWidgets.QWidget):
         "distance_ratio": 0.05,
         "resize_base": 2560,
         "margin_pixels": 8,
-        "scan_offset": 0,
     }
 
     def _detect_parallel_line_snap(
@@ -1658,7 +1657,6 @@ class Canvas(QtWidgets.QWidget):
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
         min_agreement = rule.get("min_agreement", d["min_agreement"])
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
-        scan_offset = rule.get("scan_offset", d["scan_offset"])
 
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
@@ -1668,10 +1666,13 @@ class Canvas(QtWidgets.QWidget):
         right = max(p0.x(), p1.x())
         top = min(p0.y(), p1.y())
         bottom = max(p0.y(), p1.y())
-        max_scan = int(max(right - left, bottom - top)) + scan_offset
+
+        # Dynamic offset: 1/5 of the short side (constant for all edges)
+        short_side = min(right - left, bottom - top)
+        scan_offset = short_side / 5.0
+        max_scan = int(max(right - left, bottom - top) + scan_offset)
 
         if is_horiz:
-            # Scan origin: cursor_y offset outward by scan_offset
             cursor_val = cursor_pos.y()
             iy = int(round(cursor_val - scan_dir * scan_offset))
             xs = np.arange(int(np.ceil(left)), int(np.floor(right)) + 1)
@@ -1686,7 +1687,6 @@ class Canvas(QtWidgets.QWidget):
             values = [dy for _, dy in dots]
             val_fn = lambda dx, dy: dy
         else:
-            # Scan origin: cursor_x offset outward by scan_offset
             cursor_val = cursor_pos.x()
             ix = int(round(cursor_val - scan_dir * scan_offset))
             ys = np.arange(int(np.ceil(top)), int(np.floor(bottom)) + 1)
