@@ -2224,7 +2224,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def pasteSelectedShape(self):
         # Create copies with offset (in image coordinates, adjusted for zoom)
-        screen_offset = 20  # Constant offset in screen pixels
+        screen_offset = 30  # Constant offset in screen pixels
         image_offset = screen_offset / self.canvas.scale  # Convert to image coordinates
         new_shapes = []
         for shape in self._copied_shapes:
@@ -2600,17 +2600,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 medians[f"pl:{i}"] = margin_px * scale
             else:
                 medians[f"pl:{i}"] = float(margin_px)
-        # Text bounding rules — margin from resize_base / margin_pixels
-        for i, rule in enumerate(cfg.get("text_bounding", [])):
-            resize_base = rule.get("resize_base", 2560)
-            margin_px = rule.get("margin_pixels", 8)
-            if self.canvas.pixmap is not None:
-                img_w = self.canvas.pixmap.width()
-                img_h = self.canvas.pixmap.height()
-                scale = max(img_w, img_h) / resize_base
-                medians[f"tb:{i}"] = margin_px * scale
-            else:
-                medians[f"tb:{i}"] = float(margin_px)
+        # Text bounding: margin/snap computed directly in canvas from rule params
         self.canvas.setReferenceMedians(medians)
 
     def _toggle_parallel_line_dist_visible(self, checked: bool) -> None:

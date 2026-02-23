@@ -90,20 +90,18 @@ canvas:
 #       - target_label: "notes"
 #         resize_base: 2560           # letterbox resize reference (longer side)
 #         margin_pixels: 10           # margin at resize_base scale
-#         snap_range: 0.75            # trigger zone = margin ± margin * range
+#         snap_range_pixels: 5        # ±5px lock zone (at resize_base scale)
 #         sample_points: 11
 #         consecutive_window: 8
-#         distance_tolerance: 5
+#         distance_tolerance: 0.5
 #         dark_pixel_threshold: 128
 #     text_bounding:
 #       - target_label: "title"
 #         resize_base: 2560           # letterbox resize reference (longer side)
-#         margin_pixels: 8            # margin at resize_base scale
-#         distance_ratio: 0.05        # snap offset = margin * ratio
-#         snap_range: 0.75            # trigger zone = offset ± margin * range
+#         margin_pixels: 0.5          # offset from boundary (at resize_base scale)
+#         snap_range_pixels: 3        # ±3px lock zone (at resize_base scale)
 #         luminance_threshold: 30
 #         min_agreement: 6
-#         distance_tolerance: 5
 edge_snap:
   parallel_line: []
   text_bounding: []
