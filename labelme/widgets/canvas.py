@@ -142,6 +142,7 @@ class Canvas(QtWidgets.QWidget):
         # State flags used by cursor handling during init/reset
         self._vertex_dragging = False  # True when dragging a vertex
         self._edge_midpoint_dragging = False  # True when dragging an edge midpoint
+        self._edge_midpoint_drag_shape = None  # Shape whose edge midpoint is being dragged
         self._dragging_edge_index = None  # Which edge is being dragged (EDGE_TOP, etc.)
         self._snap_active = False  # True when parallel line snap is active
         self._snap_line_pos = None  # Position of detected parallel line (image coords)
@@ -683,9 +684,13 @@ class Canvas(QtWidgets.QWidget):
             index = shape.nearestVertex(pos, self.epsilon)
             index_edge = shape.nearestEdge(pos, self.epsilon)
             if index is not None:
-                if self.selectedVertex() and self.hShape:
+                if self.hShape and self.hShape is not shape:
+                    self.hShape.highlightClear()
+                elif self.selectedVertex() and self.hShape:
                     self.hShape.highlightClear()
                 self.prevhVertex = self.hVertex = index
+                self.prevhEdgeMidpoint = self.hEdgeMidpoint
+                self.hEdgeMidpoint = None
                 self.prevhShape = self.hShape = shape
                 self.prevhEdge = self.hEdge
                 self.hEdge = None
@@ -699,10 +704,14 @@ class Canvas(QtWidgets.QWidget):
                 self.update()
                 break
             elif index_edge is not None and shape.canAddPoint():
-                if self.selectedVertex() and self.hShape:
+                if self.hShape and self.hShape is not shape:
+                    self.hShape.highlightClear()
+                elif self.selectedVertex() and self.hShape:
                     self.hShape.highlightClear()
                 self.prevhVertex = self.hVertex
                 self.hVertex = None
+                self.prevhEdgeMidpoint = self.hEdgeMidpoint
+                self.hEdgeMidpoint = None
                 self.prevhShape = self.hShape = shape
                 self.prevhEdge = self.hEdge = index_edge
                 self.overrideCursor(CURSOR_POINT)
@@ -712,7 +721,9 @@ class Canvas(QtWidgets.QWidget):
             # Check for rectangle edge midpoint
             edge_midpoint = shape.nearestEdgeMidpoint(pos, self.epsilon)
             if edge_midpoint is not None:
-                if self.selectedVertex() and self.hShape:
+                if self.hShape and self.hShape is not shape:
+                    self.hShape.highlightClear()
+                elif self.selectedVertex() and self.hShape:
                     self.hShape.highlightClear()
                 self.prevhVertex = self.hVertex
                 self.hVertex = None
@@ -724,9 +735,11 @@ class Canvas(QtWidgets.QWidget):
                 self.update()
                 break
             elif shape.containsPoint(pos):
-                if self.selectedVertex() and self.hShape:
+                if self.hShape and self.hShape is not shape:
                     self.hShape.highlightClear()
-                if self.hEdgeMidpoint is not None and self.hShape:
+                elif self.selectedVertex() and self.hShape:
+                    self.hShape.highlightClear()
+                elif self.hEdgeMidpoint is not None and self.hShape:
                     self.hShape.highlightClear()
                 self.prevhVertex = self.hVertex
                 self.hVertex = None
@@ -921,6 +934,7 @@ class Canvas(QtWidgets.QWidget):
                 elif self.hEdgeMidpoint is not None:
                     self._edge_midpoint_dragging = True
                     self._dragging_edge_index = self.hEdgeMidpoint
+                    self._edge_midpoint_drag_shape = self.hShape  # Track shape for flag restore
                     self.hShape._hide_edge_midpoint = True  # Hide edge midpoint during drag
                     self.prevMovePoint = pos  # Set immediately for grid line
                     self._force_blank_cursor()
@@ -1047,7 +1061,13 @@ class Canvas(QtWidgets.QWidget):
         if self._edge_midpoint_dragging:
             if self.hShape:
                 self.hShape.touch()  # Update modification timestamp
-                self.hShape._hide_edge_midpoint = False  # Restore edge midpoint
+            # Restore edge midpoint on the shape that started the drag
+            drag_shape = getattr(self, "_edge_midpoint_drag_shape", None)
+            if drag_shape is not None:
+                drag_shape._hide_edge_midpoint = False
+                self._edge_midpoint_drag_shape = None
+            elif self.hShape:
+                self.hShape._hide_edge_midpoint = False
             self._edge_midpoint_dragging = False
             self._dragging_edge_index = None
             self._snap_active = False
@@ -1299,7 +1319,7 @@ class Canvas(QtWidgets.QWidget):
 
     # -- Parallel line snap detection defaults (overridden by edge_snap config) --
     _PL_DEFAULTS = {
-        "dark_pixel_threshold": 128,
+        "luminance_threshold": 128,
         "sample_points": 11,
         "consecutive_window": 8,
         "distance_tolerance": 0.5,
@@ -1336,7 +1356,7 @@ class Canvas(QtWidgets.QWidget):
         sample_points = rule.get("sample_points", d["sample_points"])
         consec_window = rule.get("consecutive_window", d["consecutive_window"])
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
-        dark_thresh = rule.get("dark_pixel_threshold", d["dark_pixel_threshold"])
+        lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
         resize_base = rule.get("resize_base", d["resize_base"])
 
         M = margin
@@ -1393,7 +1413,7 @@ class Canvas(QtWidgets.QWidget):
 
             result = self._detect_line_h(
                 xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
-                consec_window, dist_tol, dark_thresh,
+                consec_window, dist_tol, lum_thresh,
             )
             if result is not None:
                 near_edge, center = result
@@ -1423,7 +1443,7 @@ class Canvas(QtWidgets.QWidget):
 
             result = self._detect_line_v(
                 ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
-                consec_window, dist_tol, dark_thresh,
+                consec_window, dist_tol, lum_thresh,
             )
             if result is not None:
                 near_edge, center = result
@@ -1442,9 +1462,10 @@ class Canvas(QtWidgets.QWidget):
         return None
 
     def _detect_line_h(self, xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
-                       consec_window, dist_tol, dark_thresh):
+                       consec_window, dist_tol, lum_thresh):
         """Detect parallel line by scanning vertically from horizontal edge samples.
 
+        Uses luminance difference from base (edge position) to detect lines.
         Scans all sample points upfront, then slides a window looking for
         sufficient agreement.  Allows up to 2 misses per window to tolerate
         noise, text crossing the line, etc.
@@ -1456,7 +1477,7 @@ class Canvas(QtWidgets.QWidget):
         n = len(xs)
         w = min(consec_window, n)
         tol = dist_tol
-        thresh = dark_thresh
+        thresh = lum_thresh
         # Each hit stores (found, near_edge, center)
         hits: list[tuple[bool, float, float]] = []
 
@@ -1466,17 +1487,18 @@ class Canvas(QtWidgets.QWidget):
             if col < 0 or col >= img_w:
                 hits.append((False, -1.0, -1.0))
                 continue
+            base_lum = int(grayscale[iy, col])
             found = False
             for d in range(1, max_scan + 1):
                 sy = iy + scan_dir * d
                 if sy < 0 or sy >= img_h:
                     break
-                if grayscale[sy, col] < thresh:
+                if abs(int(grayscale[sy, col]) - base_lum) > thresh:
                     # Sub-pixel near edge (closest to rectangle edge)
                     y_prev = iy + scan_dir * (d - 1)
-                    v_prev = float(grayscale[y_prev, col])
-                    v_dark = float(grayscale[sy, col])
-                    dv = v_dark - v_prev
+                    v_prev = abs(float(grayscale[y_prev, col]) - base_lum)
+                    v_hit = abs(float(grayscale[sy, col]) - base_lum)
+                    dv = v_hit - v_prev
                     if dv != 0:
                         refined_near = y_prev + scan_dir * (thresh - v_prev) / dv
                     else:
@@ -1487,18 +1509,18 @@ class Canvas(QtWidgets.QWidget):
                         sy2 = iy + scan_dir * d2
                         if sy2 < 0 or sy2 >= img_h:
                             break
-                        if grayscale[sy2, col] < thresh:
+                        if abs(int(grayscale[sy2, col]) - base_lum) > thresh:
                             sy_end = sy2
                         else:
                             break
                     # Sub-pixel far edge
                     y_after = sy_end + scan_dir
-                    if 0 <= y_after < img_h and grayscale[y_after, col] >= thresh:
-                        v_last = float(grayscale[sy_end, col])
-                        v_after = float(grayscale[y_after, col])
-                        dv2 = v_after - v_last
+                    if 0 <= y_after < img_h and abs(int(grayscale[y_after, col]) - base_lum) <= thresh:
+                        v_last = abs(float(grayscale[sy_end, col]) - base_lum)
+                        v_after = abs(float(grayscale[y_after, col]) - base_lum)
+                        dv2 = v_last - v_after
                         if dv2 != 0:
-                            refined_far = sy_end + scan_dir * (thresh - v_last) / dv2
+                            refined_far = sy_end + scan_dir * (v_last - thresh) / dv2
                         else:
                             refined_far = float(sy_end)
                     else:
@@ -1527,9 +1549,10 @@ class Canvas(QtWidgets.QWidget):
         return None
 
     def _detect_line_v(self, ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
-                       consec_window, dist_tol, dark_thresh):
+                       consec_window, dist_tol, lum_thresh):
         """Detect parallel line by scanning horizontally from vertical edge samples.
 
+        Uses luminance difference from base (edge position) to detect lines.
         Same tolerance logic as _detect_line_h (allows up to 2 misses per window).
 
         Returns (near_edge, center) tuple or None.
@@ -1537,7 +1560,7 @@ class Canvas(QtWidgets.QWidget):
         n = len(ys)
         w = min(consec_window, n)
         tol = dist_tol
-        thresh = dark_thresh
+        thresh = lum_thresh
         hits: list[tuple[bool, float, float]] = []
 
         for idx in range(n):
@@ -1546,17 +1569,18 @@ class Canvas(QtWidgets.QWidget):
             if row < 0 or row >= img_h:
                 hits.append((False, -1.0, -1.0))
                 continue
+            base_lum = int(grayscale[row, ix])
             found = False
             for d in range(1, max_scan + 1):
                 sx = ix + scan_dir * d
                 if sx < 0 or sx >= img_w:
                     break
-                if grayscale[row, sx] < thresh:
+                if abs(int(grayscale[row, sx]) - base_lum) > thresh:
                     # Sub-pixel near edge
                     x_prev = ix + scan_dir * (d - 1)
-                    v_prev = float(grayscale[row, x_prev])
-                    v_dark = float(grayscale[row, sx])
-                    dv = v_dark - v_prev
+                    v_prev = abs(float(grayscale[row, x_prev]) - base_lum)
+                    v_hit = abs(float(grayscale[row, sx]) - base_lum)
+                    dv = v_hit - v_prev
                     if dv != 0:
                         refined_near = x_prev + scan_dir * (thresh - v_prev) / dv
                     else:
@@ -1567,18 +1591,18 @@ class Canvas(QtWidgets.QWidget):
                         sx2 = ix + scan_dir * d2
                         if sx2 < 0 or sx2 >= img_w:
                             break
-                        if grayscale[row, sx2] < thresh:
+                        if abs(int(grayscale[row, sx2]) - base_lum) > thresh:
                             sx_end = sx2
                         else:
                             break
                     # Sub-pixel far edge
                     x_after = sx_end + scan_dir
-                    if 0 <= x_after < img_w and grayscale[row, x_after] >= thresh:
-                        v_last = float(grayscale[row, sx_end])
-                        v_after = float(grayscale[row, x_after])
-                        dv2 = v_after - v_last
+                    if 0 <= x_after < img_w and abs(int(grayscale[row, x_after]) - base_lum) <= thresh:
+                        v_last = abs(float(grayscale[row, sx_end]) - base_lum)
+                        v_after = abs(float(grayscale[row, x_after]) - base_lum)
+                        dv2 = v_last - v_after
                         if dv2 != 0:
-                            refined_far = sx_end + scan_dir * (thresh - v_last) / dv2
+                            refined_far = sx_end + scan_dir * (v_last - thresh) / dv2
                         else:
                             refined_far = float(sx_end)
                     else:
@@ -1941,6 +1965,8 @@ class Canvas(QtWidgets.QWidget):
 
     def deSelectShape(self):
         if self.selectedShapes:
+            for shape in self.selectedShapes:
+                shape.highlightClear()
             self.setHiding(False)
             self.selectionChanged.emit([])
             self.hShapeIsSelected = False
@@ -2641,6 +2667,7 @@ class Canvas(QtWidgets.QWidget):
         self.prevhEdge = None
         self.hEdgeMidpoint = None  # For rectangle edge midpoint hovering
         self.prevhEdgeMidpoint = None
+        self._edge_midpoint_drag_shape = None
         self._text_bounding_snap_dots = None
         self._tb_boundary_cache = None
         self._pl_snap_cache = None

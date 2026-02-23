@@ -91,10 +91,10 @@ canvas:
 #         resize_base: 2560           # letterbox resize reference (longer side)
 #         margin_pixels: 10           # margin at resize_base scale
 #         snap_range_pixels: 5        # ±5px lock zone (at resize_base scale)
+#         luminance_threshold: 128    # luminance diff from base to detect line
 #         sample_points: 11
 #         consecutive_window: 8
 #         distance_tolerance: 0.5
-#         dark_pixel_threshold: 128
 #     text_bounding:
 #       - target_label: "title"
 #         resize_base: 2560           # letterbox resize reference (longer side)
