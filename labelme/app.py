@@ -313,6 +313,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._text_bounding_toggled
         )
 
+        self.darkPixelMagnetCheckbox = QtWidgets.QCheckBox()
+        self.darkPixelMagnetCheckbox.toggled.connect(
+            self._dark_pixel_magnet_toggled
+        )
+
         self.setAcceptDrops(True)
 
         self.canvas = Canvas(
@@ -327,6 +332,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
         if "edge_snap" in self._config:
             self.canvas.setEdgeSnapConfig(self._config["edge_snap"])
+        self.canvas.setDarkPixelMagnetConfig(
+            self._config.get("dark_pixel_magnet", [])
+        )
+        self.uniqLabelList.itemSelectionChanged.connect(
+            self._update_pending_draw_label
+        )
 
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
@@ -687,6 +698,13 @@ class MainWindow(QtWidgets.QMainWindow):
             checked=False,
         )
 
+        showDarkPixelMagnet = action(
+            self.tr("カーソル配下色制御を表示"),
+            self._toggle_dark_pixel_magnet_visible,
+            checkable=True,
+            checked=False,
+        )
+
         hideAll = action(
             self.tr("&Hide\nPolygons"),
             functools.partial(self.togglePolygons, False),
@@ -830,6 +848,19 @@ class MainWindow(QtWidgets.QMainWindow):
         textBounding.defaultWidget().setLayout(textBoundingBoxLayout)
         textBounding.setVisible(False)
         self._textBoundingAction = textBounding
+
+        darkPixelMagnet = QtWidgets.QWidgetAction(self)
+        darkPixelMagnetBoxLayout = QtWidgets.QVBoxLayout()
+        darkPixelMagnetLabel = QtWidgets.QLabel(self.tr("カーソル\n配下色制御"))
+        darkPixelMagnetLabel.setAlignment(Qt.AlignCenter)
+        darkPixelMagnetBoxLayout.addWidget(darkPixelMagnetLabel)
+        darkPixelMagnetBoxLayout.addWidget(
+            self.darkPixelMagnetCheckbox, alignment=Qt.AlignCenter
+        )
+        darkPixelMagnet.setDefaultWidget(QtWidgets.QWidget())
+        darkPixelMagnet.defaultWidget().setLayout(darkPixelMagnetBoxLayout)
+        darkPixelMagnet.setVisible(False)
+        self._darkPixelMagnetAction = darkPixelMagnet
 
         self.zoomWidget.setWhatsThis(
             str(
@@ -1022,6 +1053,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showRedo=showRedo,
             showParallelLineDist=showParallelLineDist,
             showTextBounding=showTextBounding,
+            showDarkPixelMagnet=showDarkPixelMagnet,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
         )
@@ -1146,6 +1178,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 showRedo,
                 showParallelLineDist,
                 showTextBounding,
+                showDarkPixelMagnet,
             ),
         )
 
@@ -1210,6 +1243,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     skipDeleteConfirm,
                     parallelLineDist,
                     textBounding,
+                    darkPixelMagnet,
                     None,
                     selectAiModel,
                     None,
@@ -1336,6 +1370,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.actions.showTextBounding.setChecked(showTextBoundingEnabled)
         self._toggle_text_bounding_visible(showTextBoundingEnabled)
+        darkPixelMagnetEnabled = self.settings.value(
+            "canvas/darkPixelMagnet", False, type=bool
+        )
+        self.darkPixelMagnetCheckbox.setChecked(darkPixelMagnetEnabled)
+        showDarkPixelMagnetEnabled = self.settings.value(
+            "view/showDarkPixelMagnet", False, type=bool
+        )
+        self.actions.showDarkPixelMagnet.setChecked(showDarkPixelMagnetEnabled)
+        self._toggle_dark_pixel_magnet_visible(showDarkPixelMagnetEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -1811,6 +1854,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._update_shape_color(shape)
         self.setDirty()
+
+    def _update_pending_draw_label(self):
+        """Keep canvas pending draw label in sync for dark pixel magnet."""
+        label = None
+        items = self.uniqLabelList.selectedItems()
+        if items:
+            label = items[0].data(Qt.UserRole)
+        elif self._last_label:
+            label = self._last_label
+        self.canvas.setPendingDrawLabel(label)
 
     def _update_change_same_action(self):
         """Update changeSame action text and enabled state."""
@@ -2355,6 +2408,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Update last used label for changeSame action
             self._last_label = text
             self._update_change_same_action()
+            self._update_pending_draw_label()
             self.actions.undoLastPoint.setEnabled(False)
             self.actions.undo.setEnabled(True)
             self.setDirty()
@@ -2614,6 +2668,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_text_bounding_visible(self, checked: bool) -> None:
         if hasattr(self, "_textBoundingAction"):
             self._textBoundingAction.setVisible(checked)
+
+    def _dark_pixel_magnet_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setDarkPixelMagnetEnabled(checked)
+
+    def _toggle_dark_pixel_magnet_visible(self, checked: bool) -> None:
+        if hasattr(self, "_darkPixelMagnetAction"):
+            self._darkPixelMagnetAction.setVisible(checked)
 
     def _toggle_redo_visible(self, checked: bool) -> None:
         self.actions.redo.setVisible(checked)
@@ -2909,6 +2971,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "view/showTextBounding",
             self.actions.showTextBounding.isChecked(),
+        )
+        self.settings.setValue(
+            "canvas/darkPixelMagnet",
+            self.darkPixelMagnetCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showDarkPixelMagnet",
+            self.actions.showDarkPixelMagnet.isChecked(),
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
@@ -3748,6 +3818,10 @@ class MainWindow(QtWidgets.QMainWindow):
         stats: list[str] = []
         stats.append(f"mode={self.canvas.mode.name}")
         stats.append(f"x={mouse_pos.x():6.1f}, y={mouse_pos.y():6.1f}")
+        pixel = self.canvas.getPixelInfo(mouse_pos)
+        if pixel is not None:
+            r, g, b, gray = pixel
+            stats.append(f"R={r} G={g} B={b} Gray={gray}")
         self.status_right.setText(" | ".join(stats))
 
 

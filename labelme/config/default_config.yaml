@@ -106,6 +106,17 @@ edge_snap:
   parallel_line: []
   text_bounding: []
 
+# Dark pixel magnet: cursor snaps to dark pixels during vertex drag / shape drawing.
+# Only active for shapes with matching target_label.
+# Shift key cancels snap during drag.
+# Example:
+#   dark_pixel_magnet:
+#     - target_label: "notes"
+#       resize_base: 2560           # snap_range_pixels reference scale (longer side)
+#       snap_range_pixels: 20       # search square side length (at resize_base scale)
+#       luminance_threshold: 128    # snap to pixels at or below this luminance
+dark_pixel_magnet: []
+
 shortcuts:
   close: Ctrl+W
   open: Ctrl+O

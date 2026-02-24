@@ -151,6 +151,8 @@ class Canvas(QtWidgets.QWidget):
         self._right_click_edit_enabled = False
         self._parallel_line_dist_enabled = False
         self._text_bounding_enabled = False
+        self._dark_pixel_magnet_enabled = False
+        self._dpm_ghost_pos: QPointF | None = None  # real mouse pos during DPM snap
         self._text_bounding_snap_dots: list[tuple[float, float]] | None = None
         self._tb_boundary_cache: tuple | None = None  # cached boundary during drag
         self._tb_snap_entered = False  # True on first frame of snap (triggers cursor warp)
@@ -158,6 +160,8 @@ class Canvas(QtWidgets.QWidget):
         self._pl_snap_entered = False  # True on first frame of snap (triggers cursor warp)
         self._edge_snap_config: dict | None = None
         self._reference_medians: dict[str, float | None] = {}
+        self._dark_pixel_magnet_config: list[dict] | None = None
+        self._pending_draw_label: str | None = None
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
 
@@ -297,6 +301,37 @@ class Canvas(QtWidgets.QWidget):
 
     def setReferenceMedians(self, medians: dict[str, float | None]):
         self._reference_medians = medians
+
+    def setDarkPixelMagnetEnabled(self, enabled: bool):
+        self._dark_pixel_magnet_enabled = enabled
+
+    def setDarkPixelMagnetConfig(self, config: list[dict]):
+        self._dark_pixel_magnet_config = config
+
+    def setPendingDrawLabel(self, label: str | None):
+        self._pending_draw_label = label
+
+    def getPixelInfo(self, pos: QPointF):
+        """Return (R, G, B, Gray) at image position, or None if out of bounds."""
+        if self._img_arr_cache is None:
+            return None
+        x = int(round(pos.x()))
+        y = int(round(pos.y()))
+        h, w = self._img_arr_cache.shape[:2]
+        if x < 0 or x >= w or y < 0 or y >= h:
+            return None
+        if self._img_arr_cache.ndim == 3 and self._img_arr_cache.shape[2] >= 3:
+            # BGRA order
+            b, g, r = (
+                int(self._img_arr_cache[y, x, 0]),
+                int(self._img_arr_cache[y, x, 1]),
+                int(self._img_arr_cache[y, x, 2]),
+            )
+        else:
+            v = int(self._img_arr_cache[y, x])
+            r, g, b = v, v, v
+        gray = int(self._grayscale_cache[y, x]) if self._grayscale_cache is not None else int(0.299 * r + 0.587 * g + 0.114 * b)
+        return r, g, b, gray
 
     def refreshCursorOverlay(self):
         """Public method to refresh the cursor overlay state."""
@@ -554,6 +589,21 @@ class Canvas(QtWidgets.QWidget):
                 self._log_cursor_state("mouseMoveEvent:vertex_dragging")
             # Always force blank cursor while dragging a vertex
             self._force_blank_cursor()
+            # Dark pixel magnet: snap to dark pixel (polygon shapes only)
+            if (
+                not is_shift_pressed
+                and self.hShape is not None
+                and self.hShape.shape_type == "polygon"
+            ):
+                label = self.hShape.label
+                snapped = self._snap_to_dark_pixel(pos, label)
+                if snapped is not pos:
+                    self._dpm_ghost_pos = pos  # ghost at real mouse position
+                    pos = snapped
+                else:
+                    self._dpm_ghost_pos = None
+            else:
+                self._dpm_ghost_pos = None
             self.prevMovePoint = pos  # Update for crosshair drawing
             self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
             self._updateCursorOverlay()
@@ -613,6 +663,21 @@ class Canvas(QtWidgets.QWidget):
                     self.restoreCursor()
                     self.overrideCursor(CURSOR_DRAW)
                 self._near_start_point = False
+            # Dark pixel magnet during drawing (polygon only)
+            if (
+                not is_shift_pressed
+                and not self._near_start_point
+                and self.createMode == "polygon"
+            ):
+                snapped = self._snap_to_dark_pixel(pos, self._pending_draw_label)
+                if snapped is not pos:
+                    self._dpm_ghost_pos = pos  # ghost at real mouse position
+                    pos = snapped
+                    self.prevMovePoint = pos
+                else:
+                    self._dpm_ghost_pos = None
+            else:
+                self._dpm_ghost_pos = None
             if self.createMode in ["polygon", "linestrip"]:
                 self.line.points = [self.current[-1], pos]
                 self.line.point_labels = [1, 1]
@@ -856,6 +921,16 @@ class Canvas(QtWidgets.QWidget):
                         else self.createMode
                     )
                     self.current._is_creating = True  # Mark as being created
+                    # Dark pixel magnet on first click (polygon only)
+                    if (
+                        not is_shift_pressed
+                        and self.createMode == "polygon"
+                    ):
+                        snapped = self._snap_to_dark_pixel(
+                            pos, self._pending_draw_label
+                        )
+                        if snapped is not pos:
+                            pos = snapped
                     self.current.addPoint(pos, label=0 if is_shift_pressed else 1)
                     if self.createMode == "point":
                         self.finalise()
@@ -1024,6 +1099,7 @@ class Canvas(QtWidgets.QWidget):
                 self.shapeMoved.emit()
 
             self.movingShape = False
+        self._dpm_ghost_pos = None  # Clear ghost cursor
         # End vertex dragging and restore cursor
         if self._vertex_dragging:
             if self.hShape:
@@ -1276,10 +1352,6 @@ class Canvas(QtWidgets.QWidget):
             for i, rule in enumerate(cfg.get("text_bounding", [])):
                 if self.hShape.label != rule.get("target_label"):
                     continue
-                logger.debug(
-                    "TB: trying rule {} for label='{}', edge={}",
-                    i, self.hShape.label, self.hEdgeMidpoint,
-                )
                 result = self._detect_text_bounding_snap(
                     rule, i, self.hShape, self.hEdgeMidpoint, pos,
                 )
@@ -1290,10 +1362,7 @@ class Canvas(QtWidgets.QWidget):
                     if self._tb_snap_entered:
                         self._warp_cursor_to_image_pos(snap_pos)
                     break
-        elif self._snap_active:
-            logger.debug("TB: skipped (parallel line snap active)")
-        elif not self._text_bounding_enabled:
-            logger.debug("TB: skipped (text bounding disabled)")
+        # (else: parallel line snap active or text bounding disabled — skip)
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
 
@@ -1315,6 +1384,140 @@ class Canvas(QtWidgets.QWidget):
         "resize_base": 2560,
         "margin_pixels": 0.5,
     }
+    # -- Dark pixel magnet defaults --
+    _DPM_DEFAULTS = {
+        "luminance_threshold": 128,
+        "resize_base": 640,
+        "snap_range_pixels": 20,
+    }
+
+    @staticmethod
+    def _bilinear_lum(
+        grayscale: np.ndarray, x: float, y: float, w: int, h: int
+    ) -> float:
+        """Bilinear interpolation of grayscale value at sub-pixel (x, y)."""
+        x0 = int(x)
+        y0 = int(y)
+        x1 = min(x0 + 1, w - 1)
+        y1 = min(y0 + 1, h - 1)
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        fx = x - x0
+        fy = y - y0
+        return float(
+            grayscale[y0, x0] * (1.0 - fx) * (1.0 - fy)
+            + grayscale[y0, x1] * fx * (1.0 - fy)
+            + grayscale[y1, x0] * (1.0 - fx) * fy
+            + grayscale[y1, x1] * fx * fy
+        )
+
+    def _snap_to_dark_pixel(self, pos: QPointF, label: str | None) -> QPointF:
+        """Snap pos to nearest dark pixel if a matching rule exists.
+
+        Returns the same pos object if no snap needed, or a new QPointF if snapped.
+        Caller can use ``snapped is not pos`` to detect whether snapping occurred.
+
+        Activation: centre-pixel bilinear check only (immediate response).
+        Target: 0.1 px grid over snap_range_pixels area → binary threshold
+        → 21x21 box convolution on binary grid → reachable where conv > 0.
+        """
+        if (
+            self._grayscale_cache is None
+            or not self._dark_pixel_magnet_enabled
+            or not self._dark_pixel_magnet_config
+            or label is None
+        ):
+            return pos
+
+        # Find matching rule
+        rule = None
+        for r in self._dark_pixel_magnet_config:
+            if r.get("target_label") == label:
+                rule = r
+                break
+        if rule is None:
+            return pos
+
+        d = self._DPM_DEFAULTS
+        lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
+        resize_base = rule.get("resize_base", d["resize_base"])
+        snap_range = rule.get("snap_range_pixels", d["snap_range_pixels"])
+
+        grayscale = self._grayscale_cache
+        img_h, img_w = grayscale.shape
+        img_scale = max(img_w, img_h) / resize_base
+        actual_half = snap_range * img_scale / 2.0
+
+        # Activation: centre-pixel bilinear check.
+        # If the cursor pixel itself is dark enough, allow free movement.
+        cx, cy = pos.x(), pos.y()
+        cxc = max(0.0, min(cx, float(img_w - 1)))
+        cyc = max(0.0, min(cy, float(img_h - 1)))
+        if self._bilinear_lum(grayscale, cxc, cyc, img_w, img_h) <= lum_thresh:
+            return pos
+
+        # 0.1 px grid over snap area (slightly wider to absorb float rounding)
+        step = 0.1
+        margin = 1.0
+        x_lo = max(0.0, cx - actual_half - margin)
+        x_hi = min(float(img_w - 1), cx + actual_half + margin)
+        y_lo = max(0.0, cy - actual_half - margin)
+        y_hi = min(float(img_h - 1), cy + actual_half + margin)
+
+        xs = np.arange(x_lo, x_hi + step * 0.5, step, dtype=np.float32)
+        ys = np.arange(y_lo, y_hi + step * 0.5, step, dtype=np.float32)
+        if len(xs) < 21 or len(ys) < 21:
+            return pos
+
+        gy, gx = np.meshgrid(ys, xs, indexing="ij")
+
+        # Vectorised bilinear interpolation
+        x0 = gx.astype(np.int32)
+        y0 = gy.astype(np.int32)
+        x1 = np.minimum(x0 + 1, img_w - 1)
+        y1 = np.minimum(y0 + 1, img_h - 1)
+        fx = gx - x0
+        fy = gy - y0
+        lum = (
+            grayscale[y0, x0] * (1.0 - fx) * (1.0 - fy)
+            + grayscale[y0, x1] * fx * (1.0 - fy)
+            + grayscale[y1, x0] * (1.0 - fx) * fy
+            + grayscale[y1, x1] * fx * fy
+        )
+        del x0, y0, x1, y1, fx, fy
+
+        # Step 1: binary threshold (1 = dark, 0 = bright)
+        binary = (lum <= lum_thresh).astype(np.float64)
+        del lum
+
+        # Step 2: 19x19 box convolution on binary grid via integral image
+        # 19 cells × 0.1px = 1.9px window → ±0.9px reach from dark boundary
+        K = 19
+        KH = K // 2  # = 10
+        H, W = binary.shape
+        padded = np.pad(binary, KH, mode="constant", constant_values=0.0)
+        ii = np.cumsum(np.cumsum(padded, axis=0), axis=1)
+        ii = np.pad(ii, ((1, 0), (1, 0)), mode="constant")
+        conv = (
+            ii[K : H + K, K : W + K]
+            - ii[:H, K : W + K]
+            - ii[K : H + K, :W]
+            + ii[:H, :W]
+        )
+        del padded, ii, binary
+
+        # Reachable where convolution > 0 (any dark pixel in the 21x21 window)
+        reachable = conv > 0.0
+        if not reachable.any():
+            return pos
+
+        dist_sq = (gy - cy).astype(np.float64) ** 2 + (
+            gx - cx
+        ).astype(np.float64) ** 2
+        dist_sq[~reachable] = np.inf
+
+        best = np.unravel_index(int(np.argmin(dist_sq)), dist_sq.shape)
+        return QPointF(float(gx[best]) + 0.1, float(gy[best]) + 0.3)
 
     def _detect_parallel_line_snap(
         self,
@@ -1688,11 +1891,6 @@ class Canvas(QtWidgets.QWidget):
         boundary_img = boundary_pos + 0.5
         snap_offset = boundary_img - scan_dir * M
         dist = abs(cursor_val - snap_offset)
-        logger.debug(
-            "TB snap: boundary={:.2f}, snap_pos={:.2f}, cursor={:.2f}, "
-            "dist={:.2f}, zone=±{:.2f}",
-            boundary_img, snap_offset, cursor_val, dist, snap_window,
-        )
         if dist <= snap_window:
             # Enter snap zone — cache, lock, and signal cursor warp
             self._tb_boundary_cache = (
@@ -1747,38 +1945,12 @@ class Canvas(QtWidgets.QWidget):
             iy = int(round(cursor_val - scan_dir * scan_offset))
             xs = np.arange(int(np.ceil(left)), int(np.floor(right)) + 1)
             if len(xs) == 0:
-                logger.debug("TB: xs empty, left={}, right={}", left, right)
                 return None, []
             iy = max(0, min(iy, img_h - 1))
-            logger.debug(
-                "TB horiz: iy={}, scan_dir={}, xs={}..{} ({}cols), "
-                "offset={:.1f}, max_scan={}, lum_thresh={}",
-                iy, scan_dir, int(xs[0]), int(xs[-1]), len(xs),
-                scan_offset, max_scan, lum_thresh,
-            )
             dots = self._detect_boundary_h(
                 xs, iy, scan_dir, max_scan, grayscale, img_h, img_w, lum_thresh,
             )
-            logger.debug("TB: _detect_boundary_h returned {} dots", len(dots))
             if len(dots) < min_agreement:
-                if len(dots) > 0:
-                    sample_vals = [dy for _, dy in dots[:5]]
-                    logger.debug(
-                        "TB: too few dots ({} < {}), sample y={}",
-                        len(dots), min_agreement, sample_vals,
-                    )
-                # Debug: sample base_lum values at a few columns
-                cols_sample = xs[:: max(1, len(xs) // 5)][:5]
-                iy_lo = max(0, iy - 2)
-                iy_hi = min(img_h, iy + 3)
-                for c in cols_sample:
-                    ci = int(c)
-                    if 0 <= ci < img_w:
-                        base = int(np.max(grayscale[iy_lo:iy_hi, ci]))
-                        logger.debug(
-                            "TB:   col={} base_lum={} gs[iy,col]={}",
-                            ci, base, int(grayscale[iy, ci]),
-                        )
                 return None, []
             values = [dy for _, dy in dots]
             val_fn = lambda dx, dy: dy
@@ -1789,16 +1961,9 @@ class Canvas(QtWidgets.QWidget):
             if len(ys) == 0:
                 return None, []
             ix = max(0, min(ix, img_w - 1))
-            logger.debug(
-                "TB vert: ix={}, scan_dir={}, ys={}..{} ({}rows), "
-                "offset={:.1f}, max_scan={}, lum_thresh={}",
-                ix, scan_dir, int(ys[0]), int(ys[-1]), len(ys),
-                scan_offset, max_scan, lum_thresh,
-            )
             dots = self._detect_boundary_v(
                 ys, ix, scan_dir, max_scan, grayscale, img_h, img_w, lum_thresh,
             )
-            logger.debug("TB: _detect_boundary_v returned {} dots", len(dots))
             if len(dots) < min_agreement:
                 return None, []
             values = [dx for dx, _ in dots]
@@ -1811,7 +1976,6 @@ class Canvas(QtWidgets.QWidget):
         else:
             boundary_pos = float(max(all_vals))
 
-        logger.debug("TB: boundary_pos={:.2f} ({} dots)", boundary_pos, len(dots))
         return boundary_pos, dots
 
     def _detect_boundary_h(self, xs, iy, scan_dir, max_scan,
@@ -2088,6 +2252,18 @@ class Canvas(QtWidgets.QWidget):
                 sx = (dx + 0.5) * self.scale
                 sy = (dy + 0.5) * self.scale
                 p.drawEllipse(QPointF(sx, sy), 3.0, 3.0)
+
+        # Draw ghost cursor for dark pixel magnet (real mouse position)
+        if self._dpm_ghost_pos is not None:
+            ghost_color = QtGui.QColor(128, 128, 128, 51)  # gray, 80% transparent
+            ghost_pen = QtGui.QPen(ghost_color)
+            ghost_pen.setWidth(1)
+            p.setPen(ghost_pen)
+            gx = self._dpm_ghost_pos.x() * self.scale
+            gy = self._dpm_ghost_pos.y() * self.scale
+            arm = 12
+            p.drawLine(QPointF(gx - arm, gy), QPointF(gx + arm, gy))
+            p.drawLine(QPointF(gx, gy - arm), QPointF(gx, gy + arm))
 
         # Draw hover label next to cursor
         # Hidden during: mouse button pressed (including vertex/edge dragging)
@@ -2453,7 +2629,9 @@ class Canvas(QtWidgets.QWidget):
         self.pixmap = pixmap
         img_arr = labelme.utils.img_qt_to_arr(img_qt=self.pixmap.toImage())
         self._pixmap_hash = hash(img_arr.tobytes())
-        # Build grayscale cache for parallel line detection
+        # Cache image array (BGRA) for pixel info lookup
+        self._img_arr_cache = img_arr.copy() if img_arr.ndim >= 2 else None
+        # Build grayscale cache (OpenCV BT.601: Y = 0.299R + 0.587G + 0.114B)
         if img_arr.ndim == 3 and img_arr.shape[2] >= 3:
             # Qt ARGB32 little-endian stores as BGRA
             self._grayscale_cache = np.dot(
@@ -2636,6 +2814,7 @@ class Canvas(QtWidgets.QWidget):
         self.restoreCursor()
         self.pixmap = QtGui.QPixmap()
         self._pixmap_hash = None
+        self._img_arr_cache: np.ndarray | None = None
         self._grayscale_cache: np.ndarray | None = None
         self.shapes = []
         self._shapes_paint_order = []
@@ -2659,6 +2838,8 @@ class Canvas(QtWidgets.QWidget):
         self._text_bounding_snap_dots = None
         self._tb_boundary_cache = None
         self._pl_snap_cache = None
+        self._pending_draw_label = None
+        self._dpm_ghost_pos = None
         self.update()
 
 
