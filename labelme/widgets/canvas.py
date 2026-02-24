@@ -162,6 +162,8 @@ class Canvas(QtWidgets.QWidget):
         self._reference_medians: dict[str, float | None] = {}
         self._dark_pixel_magnet_config: list[dict] | None = None
         self._pending_draw_label: str | None = None
+        self._dpm_reachable_cache: dict[int, np.ndarray] = {}
+        self._dpm_reachable_hash: int | None = None
         self._ns_cursor_hidden = False
         self._os_cursor_hidden = False
 
@@ -1417,9 +1419,11 @@ class Canvas(QtWidgets.QWidget):
         Returns the same pos object if no snap needed, or a new QPointF if snapped.
         Caller can use ``snapped is not pos`` to detect whether snapping occurred.
 
-        Activation: centre-pixel bilinear check only (immediate response).
-        Target: 0.1 px grid over snap_range_pixels area → binary threshold
-        → 21x21 box convolution on binary grid → reachable where conv > 0.
+        Performance strategy:
+          - Reachable map (integer resolution, per threshold) is precomputed once
+            per image and cached in ``_dpm_reachable_cache``.
+          - Per frame: slice the cached map, find nearest reachable integer pixel,
+            then refine with a small 0.1px grid (±2px around hit).
         """
         if (
             self._grayscale_cache is None
@@ -1449,35 +1453,77 @@ class Canvas(QtWidgets.QWidget):
         actual_half = snap_range * img_scale / 2.0
 
         # Activation: centre-pixel bilinear check.
-        # If the cursor pixel itself is dark enough, allow free movement.
         cx, cy = pos.x(), pos.y()
         cxc = max(0.0, min(cx, float(img_w - 1)))
         cyc = max(0.0, min(cy, float(img_h - 1)))
         if self._bilinear_lum(grayscale, cxc, cyc, img_w, img_h) <= lum_thresh:
             return pos
 
-        # 0.1 px grid over snap area (slightly wider to absorb float rounding)
-        step = 0.1
-        margin = 1.0
-        x_lo = max(0.0, cx - actual_half - margin)
-        x_hi = min(float(img_w - 1), cx + actual_half + margin)
-        y_lo = max(0.0, cy - actual_half - margin)
-        y_hi = min(float(img_h - 1), cy + actual_half + margin)
+        # --- Precomputed reachable map (cached per image + threshold) ---
+        if self._dpm_reachable_hash != self._pixmap_hash:
+            self._dpm_reachable_cache = {}
+            self._dpm_reachable_hash = self._pixmap_hash
 
-        xs = np.arange(x_lo, x_hi + step * 0.5, step, dtype=np.float32)
-        ys = np.arange(y_lo, y_hi + step * 0.5, step, dtype=np.float32)
-        if len(xs) < 21 or len(ys) < 21:
+        if lum_thresh not in self._dpm_reachable_cache:
+            binary = (grayscale <= lum_thresh).astype(np.float32)
+            # K=3 box conv at integer level → ±1px reach (≈ ±0.9px at sub-pixel)
+            K = 3
+            KH = 1
+            H, W = binary.shape
+            padded = np.pad(binary, KH, mode="constant", constant_values=0.0)
+            ii = np.cumsum(np.cumsum(padded, axis=0), axis=1)
+            ii = np.pad(ii, ((1, 0), (1, 0)), mode="constant")
+            conv = (
+                ii[K : H + K, K : W + K]
+                - ii[:H, K : W + K]
+                - ii[K : H + K, :W]
+                + ii[:H, :W]
+            )
+            self._dpm_reachable_cache[lum_thresh] = conv > 0.0
+
+        reachable_full = self._dpm_reachable_cache[lum_thresh]
+
+        # Extract snap area from precomputed map
+        ix_lo = max(0, int(cx - actual_half) - 1)
+        ix_hi = min(img_w - 1, int(cx + actual_half) + 1)
+        iy_lo = max(0, int(cy - actual_half) - 1)
+        iy_hi = min(img_h - 1, int(cy + actual_half) + 1)
+
+        patch = reachable_full[iy_lo : iy_hi + 1, ix_lo : ix_hi + 1]
+        if not patch.any():
             return pos
 
-        gy, gx = np.meshgrid(ys, xs, indexing="ij")
+        # Find nearest reachable integer pixel (only iterate reachable pixels)
+        ry, rx = np.where(patch)
+        rx_abs = rx.astype(np.float32) + ix_lo
+        ry_abs = ry.astype(np.float32) + iy_lo
+        dist_c = (rx_abs - cx) ** 2 + (ry_abs - cy) ** 2
+        best_idx = int(np.argmin(dist_c))
+        hit_x = float(rx_abs[best_idx])
+        hit_y = float(ry_abs[best_idx])
 
-        # Vectorised bilinear interpolation
-        x0 = gx.astype(np.int32)
-        y0 = gy.astype(np.int32)
+        # --- Fine 0.1px grid around coarse hit (±2px) ---
+        fine_r = 2.0
+        step = 0.1
+        fx_lo = max(0.0, hit_x - fine_r)
+        fx_hi = min(float(img_w - 1), hit_x + fine_r)
+        fy_lo = max(0.0, hit_y - fine_r)
+        fy_hi = min(float(img_h - 1), hit_y + fine_r)
+
+        fxs = np.arange(fx_lo, fx_hi + step * 0.5, step, dtype=np.float32)
+        fys = np.arange(fy_lo, fy_hi + step * 0.5, step, dtype=np.float32)
+        if len(fxs) < 2 or len(fys) < 2:
+            return QPointF(hit_x + 0.3, hit_y + 0.5)
+
+        fgy, fgx = np.meshgrid(fys, fxs, indexing="ij")
+
+        # Vectorised bilinear interpolation (float32)
+        x0 = fgx.astype(np.int32)
+        y0 = fgy.astype(np.int32)
         x1 = np.minimum(x0 + 1, img_w - 1)
         y1 = np.minimum(y0 + 1, img_h - 1)
-        fx = gx - x0
-        fy = gy - y0
+        fx = fgx - x0
+        fy = fgy - y0
         lum = (
             grayscale[y0, x0] * (1.0 - fx) * (1.0 - fy)
             + grayscale[y0, x1] * fx * (1.0 - fy)
@@ -1486,38 +1532,33 @@ class Canvas(QtWidgets.QWidget):
         )
         del x0, y0, x1, y1, fx, fy
 
-        # Step 1: binary threshold (1 = dark, 0 = bright)
-        binary = (lum <= lum_thresh).astype(np.float64)
+        # Binary threshold + 17x17 box conv at 0.1px (±0.8px reach)
+        binary_f = (lum <= lum_thresh).astype(np.float32)
         del lum
 
-        # Step 2: 19x19 box convolution on binary grid via integral image
-        # 19 cells × 0.1px = 1.9px window → ±0.9px reach from dark boundary
-        K = 19
-        KH = K // 2  # = 10
-        H, W = binary.shape
-        padded = np.pad(binary, KH, mode="constant", constant_values=0.0)
+        K = 17
+        KH = K // 2
+        Hf, Wf = binary_f.shape
+        padded = np.pad(binary_f, KH, mode="constant", constant_values=0.0)
         ii = np.cumsum(np.cumsum(padded, axis=0), axis=1)
         ii = np.pad(ii, ((1, 0), (1, 0)), mode="constant")
         conv = (
-            ii[K : H + K, K : W + K]
-            - ii[:H, K : W + K]
-            - ii[K : H + K, :W]
-            + ii[:H, :W]
+            ii[K : Hf + K, K : Wf + K]
+            - ii[:Hf, K : Wf + K]
+            - ii[K : Hf + K, :Wf]
+            + ii[:Hf, :Wf]
         )
-        del padded, ii, binary
+        del padded, ii, binary_f
 
-        # Reachable where convolution > 0 (any dark pixel in the 21x21 window)
         reachable = conv > 0.0
         if not reachable.any():
-            return pos
+            return QPointF(hit_x + 0.3, hit_y + 0.5)
 
-        dist_sq = (gy - cy).astype(np.float64) ** 2 + (
-            gx - cx
-        ).astype(np.float64) ** 2
+        dist_sq = (fgy - cy) ** 2 + (fgx - cx) ** 2
         dist_sq[~reachable] = np.inf
 
         best = np.unravel_index(int(np.argmin(dist_sq)), dist_sq.shape)
-        return QPointF(float(gx[best]) + 0.1, float(gy[best]) + 0.3)
+        return QPointF(float(fgx[best]) + 0.3, float(fgy[best]) + 0.5)
 
     def _detect_parallel_line_snap(
         self,
@@ -2840,6 +2881,7 @@ class Canvas(QtWidgets.QWidget):
         self._pl_snap_cache = None
         self._pending_draw_label = None
         self._dpm_ghost_pos = None
+        self._dpm_coarse_cache = None
         self.update()
 
 
