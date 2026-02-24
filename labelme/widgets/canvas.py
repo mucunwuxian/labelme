@@ -385,6 +385,7 @@ class Canvas(QtWidgets.QWidget):
         # push this right back onto the stack.
         shapesBackup = self.shapesBackups.pop()
         self.shapes = shapesBackup
+        self.sortShapesByArea()
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
@@ -395,6 +396,7 @@ class Canvas(QtWidgets.QWidget):
             return
         shapesRedo = self.shapesRedoStack.pop()
         self.shapes = shapesRedo
+        self.sortShapesByArea()
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
@@ -669,16 +671,9 @@ class Canvas(QtWidgets.QWidget):
         # - Highlight vertex
         # Update shape/vertex fill and tooltip value accordingly.
         status_messages: list[str] = []
-        # Sort by area ascending (smallest first), points always first
-        # This ensures smaller objects and points get priority for hover
-        sorted_shapes = sorted(
-            [s for s in self.shapes if self.isVisible(s)],
-            key=lambda s: (
-                0 if s.shape_type == "point" else 1,
-                s.boundingRect().width() * s.boundingRect().height(),
-            ),
-        )
-        for shape in sorted_shapes:
+        for shape in self._shapes_hover_order:
+            if not self.isVisible(shape):
+                continue
             # Look for a nearby vertex to highlight. If that fails,
             # check if we happen to be inside a shape.
             index = shape.nearestVertex(pos, self.epsilon)
@@ -701,7 +696,6 @@ class Canvas(QtWidgets.QWidget):
                     status_messages.append(
                         self.tr("ALT + SHIFT + Click to delete point")
                     )
-                self.update()
                 break
             elif index_edge is not None and shape.canAddPoint():
                 if self.hShape and self.hShape is not shape:
@@ -716,7 +710,6 @@ class Canvas(QtWidgets.QWidget):
                 self.prevhEdge = self.hEdge = index_edge
                 self.overrideCursor(CURSOR_POINT)
                 status_messages.append(self.tr("ALT + Click to create point on shape"))
-                self.update()
                 break
             # Check for rectangle edge midpoint
             edge_midpoint = shape.nearestEdgeMidpoint(pos, self.epsilon)
@@ -732,7 +725,6 @@ class Canvas(QtWidgets.QWidget):
                 shape.highlightEdgeMidpoint(edge_midpoint)
                 self.overrideCursor(CURSOR_POINT)
                 status_messages.append(self.tr("Click & drag to resize rectangle"))
-                self.update()
                 break
             elif shape.containsPoint(pos):
                 if self.hShape and self.hShape is not shape:
@@ -755,7 +747,6 @@ class Canvas(QtWidgets.QWidget):
                     ]
                 )
                 self.overrideCursor(CURSOR_GRAB)
-                self.update()
                 break
         else:  # Nothing found, clear highlights, reset state.
             self.unHighlight()
@@ -899,14 +890,9 @@ class Canvas(QtWidgets.QWidget):
 
                 # If no hover vertex is set, resolve the nearest vertex on click
                 if self.hVertex is None:
-                    sorted_shapes = sorted(
-                        [s for s in self.shapes if self.isVisible(s)],
-                        key=lambda s: (
-                            0 if s.shape_type == "point" else 1,
-                            s.boundingRect().width() * s.boundingRect().height(),
-                        ),
-                    )
-                    for shape in sorted_shapes:
+                    for shape in self._shapes_hover_order:
+                        if not self.isVisible(shape):
+                            continue
                         index = shape.nearestVertex(pos, self.epsilon)
                         if index is not None:
                             if self.selectedVertex() and self.hShape:
@@ -1104,6 +1090,7 @@ class Canvas(QtWidgets.QWidget):
             for i, shape in enumerate(self.selectedShapesCopy):
                 self.selectedShapes[i].points = shape.points
         self.selectedShapesCopy = []
+        self.sortShapesByArea()
         self.repaint()
         self.storeShapes()
         return True
@@ -1178,14 +1165,7 @@ class Canvas(QtWidgets.QWidget):
             shape: Shape
             # Sort by area ascending (smallest first), points always first
             # This ensures smaller objects are selected over larger ones
-            sorted_shapes = sorted(
-                self.shapes,
-                key=lambda s: (
-                    0 if s.shape_type == "point" else 1,
-                    s.boundingRect().width() * s.boundingRect().height(),
-                ),
-            )
-            for shape in sorted_shapes:
+            for shape in self._shapes_hover_order:
                 if self.isVisible(shape) and shape.containsPoint(point):
                     self.setHiding()
                     if shape not in self.selectedShapes:
@@ -1978,6 +1958,7 @@ class Canvas(QtWidgets.QWidget):
             for shape in self.selectedShapes:
                 self.shapes.remove(shape)
                 deleted_shapes.append(shape)
+            self.sortShapesByArea()
             self.storeShapes()
             self.selectedShapes = []
             self.update()
@@ -1988,6 +1969,7 @@ class Canvas(QtWidgets.QWidget):
             self.selectedShapes.remove(shape)
         if shape in self.shapes:
             self.shapes.remove(shape)
+        self.sortShapesByArea()
         self.storeShapes()
         self.update()
 
@@ -2036,16 +2018,7 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
-        # Sort shapes: largest first, but points always on top
-        # Key: (is_point, -area) - points get (1, x), others get (0, -area)
-        sorted_shapes = sorted(
-            self.shapes,
-            key=lambda s: (
-                1 if s.shape_type == "point" else 0,
-                -(s.boundingRect().width() * s.boundingRect().height()),
-            ),
-        )
-        for shape in sorted_shapes:
+        for shape in self._shapes_paint_order:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 shape.paint(p)
@@ -2257,6 +2230,7 @@ class Canvas(QtWidgets.QWidget):
         self.current._is_creating = False  # No longer creating
 
         self.shapes.append(self.current)
+        self.sortShapesByArea()
         self.storeShapes()
         self.current = None
         self._near_start_point = False  # Reset for next shape
@@ -2492,6 +2466,8 @@ class Canvas(QtWidgets.QWidget):
             self._grayscale_cache = None
         if clear_shapes:
             self.shapes = []
+            self._shapes_paint_order = []
+            self._shapes_hover_order = []
         # Reset prevMovePoint to avoid out-of-bounds cursor position from previous image
         self.prevMovePoint = None
         self._cursor_overlay.hideCursor()
@@ -2511,11 +2487,21 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def sortShapesByArea(self):
-        """Sort shapes so smaller objects are on top (drawn last), points always on top."""
-        self.shapes.sort(
+        """Rebuild cached sort orders for painting and hover detection."""
+        # Paint order: largest first, points on top (drawn last)
+        self._shapes_paint_order = sorted(
+            self.shapes,
             key=lambda s: (
                 1 if s.shape_type == "point" else 0,
                 -(s.boundingRect().width() * s.boundingRect().height()),
+            ),
+        )
+        # Hover order: smallest first, points first (priority for selection)
+        self._shapes_hover_order = sorted(
+            self.shapes,
+            key=lambda s: (
+                0 if s.shape_type == "point" else 1,
+                s.boundingRect().width() * s.boundingRect().height(),
             ),
         )
 
@@ -2652,6 +2638,8 @@ class Canvas(QtWidgets.QWidget):
         self._pixmap_hash = None
         self._grayscale_cache: np.ndarray | None = None
         self.shapes = []
+        self._shapes_paint_order = []
+        self._shapes_hover_order = []
         self.shapesBackups = []
         self.shapesRedoStack = []
         self._undone_points = []
