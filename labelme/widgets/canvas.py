@@ -158,7 +158,8 @@ class Canvas(QtWidgets.QWidget):
         self._tb_snap_entered = False  # True on first frame of snap (triggers cursor warp)
         self._pl_snap_cache: tuple | None = None  # cached parallel line snap during drag
         self._pl_snap_entered = False  # True on first frame of snap (triggers cursor warp)
-        self._edge_snap_config: dict | None = None
+        self._parallel_line_magnet_config: list[dict] = []
+        self._text_bounding_magnet_config: list[dict] = []
         self._reference_medians: dict[str, float | None] = {}
         self._dark_pixel_magnet_config: list[dict] | None = None
         self._pending_draw_label: str | None = None
@@ -298,8 +299,11 @@ class Canvas(QtWidgets.QWidget):
     def setTextBoundingEnabled(self, enabled: bool):
         self._text_bounding_enabled = enabled
 
-    def setEdgeSnapConfig(self, config: dict):
-        self._edge_snap_config = config
+    def setParallelLineMagnetConfig(self, config: list[dict]):
+        self._parallel_line_magnet_config = config
+
+    def setTextBoundingMagnetConfig(self, config: list[dict]):
+        self._text_bounding_magnet_config = config
 
     def setReferenceMedians(self, medians: dict[str, float | None]):
         self._reference_medians = medians
@@ -1328,11 +1332,9 @@ class Canvas(QtWidgets.QWidget):
             self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
             return
 
-        cfg = self._edge_snap_config or {}
-
         # Parallel line snap: try each rule in order
         if self._parallel_line_dist_enabled:
-            for i, rule in enumerate(cfg.get("parallel_line", [])):
+            for i, rule in enumerate(self._parallel_line_magnet_config):
                 if self.hShape.label != rule.get("target_label"):
                     continue
                 margin = self._reference_medians.get(f"pl:{i}")
@@ -1351,7 +1353,7 @@ class Canvas(QtWidgets.QWidget):
 
         # Text bounding snap: try each rule (only if parallel line didn't snap)
         if not self._snap_active and self._text_bounding_enabled:
-            for i, rule in enumerate(cfg.get("text_bounding", [])):
+            for i, rule in enumerate(self._text_bounding_magnet_config):
                 if self.hShape.label != rule.get("target_label"):
                     continue
                 result = self._detect_text_bounding_snap(
@@ -1368,7 +1370,7 @@ class Canvas(QtWidgets.QWidget):
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
 
-    # -- Parallel line snap detection defaults (overridden by edge_snap config) --
+    # -- Parallel line magnet detection defaults --
     _PL_DEFAULTS = {
         "luminance_threshold": 128,
         "sample_points": 11,

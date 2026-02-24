@@ -330,8 +330,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.pinchZoomRequest.connect(self._pinch_zoom_requested)
         self.canvas.mouseMoved.connect(self._update_status_stats)
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
-        if "edge_snap" in self._config:
-            self.canvas.setEdgeSnapConfig(self._config["edge_snap"])
+        self.canvas.setParallelLineMagnetConfig(
+            self._config.get("parallel_line_magnet", [])
+        )
+        self.canvas.setTextBoundingMagnetConfig(
+            self._config.get("text_bounding_magnet", [])
+        )
         self.canvas.setDarkPixelMagnetConfig(
             self._config.get("dark_pixel_magnet", [])
         )
@@ -2641,10 +2645,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _recompute_reference_medians(self) -> None:
         if not hasattr(self, "canvas") or self.canvas is None:
             return
-        cfg = self._config.get("edge_snap", {})
         medians: dict[str, float | None] = {}
         # Parallel line rules — margin from resize_base / margin_pixels
-        for i, rule in enumerate(cfg.get("parallel_line", [])):
+        for i, rule in enumerate(self._config.get("parallel_line_magnet", [])):
             resize_base = rule.get("resize_base", 2560)
             margin_px = rule.get("margin_pixels", 10)
             if self.canvas.pixmap is not None:
