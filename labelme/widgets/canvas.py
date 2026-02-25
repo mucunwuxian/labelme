@@ -1572,8 +1572,9 @@ class Canvas(QtWidgets.QWidget):
             else:
                 hits.append((False, -1.0))
 
-        # Consensus: cascade from strict to relaxed tolerance
+        # Stage 1: consensus to find approximate line position
         min_hits = max(w - 1, (w + 1) // 2)
+        initial_peak = None
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1583,8 +1584,59 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
+                    initial_peak = float(np.median(agree))
+                    break
+            if initial_peak is not None:
+                break
+        if initial_peak is None:
+            return None
+
+        # Stage 2: refine — search ±3px around initial peak for deeper valley
+        refine_r = 3
+        iy2 = int(round(initial_peak))
+        refined_hits: list[tuple[bool, float]] = []
+        for idx in range(n):
+            col = int(round(xs[idx]))
+            if col < 0 or col >= img_w:
+                refined_hits.append((False, -1.0))
+                continue
+            best_lum = 256.0
+            best_y = -1
+            for sy in range(max(0, iy2 - refine_r), min(img_h, iy2 + refine_r + 1)):
+                lum = float(grayscale[sy, col])
+                if lum <= lum_thresh and lum < best_lum:
+                    best_lum = lum
+                    best_y = sy
+            if best_y >= 0:
+                y0 = best_y
+                ym1 = max(0, y0 - 1)
+                yp1 = min(img_h - 1, y0 + 1)
+                v_m1 = float(grayscale[ym1, col])
+                v_0 = float(grayscale[y0, col])
+                v_p1 = float(grayscale[yp1, col])
+                denom = v_m1 - 2.0 * v_0 + v_p1
+                if abs(denom) > 1e-6:
+                    offset = 0.5 * (v_m1 - v_p1) / denom
+                    offset = max(-0.5, min(0.5, offset))
+                else:
+                    offset = 0.0
+                refined_hits.append((True, float(y0) + offset + 0.5))
+            else:
+                refined_hits.append((False, -1.0))
+
+        # Consensus on refined hits
+        for tol in (dist_tol * 0.5, dist_tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [refined_hits[i][1] for i in range(start, end) if refined_hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                median = float(np.median(window))
+                agree = [v for v in window if abs(v - median) <= tol]
+                if len(agree) >= min_hits:
                     return float(np.median(agree))
-        return None
+        # Fallback to stage 1 result
+        return initial_peak
 
     def _find_line_peak_v(self, ys, ix, max_scan, grayscale, img_h, img_w,
                           consec_window, dist_tol, lum_thresh):
@@ -1650,7 +1702,9 @@ class Canvas(QtWidgets.QWidget):
             else:
                 hits.append((False, -1.0))
 
+        # Stage 1: consensus to find approximate line position
         min_hits = max(w - 1, (w + 1) // 2)
+        initial_peak = None
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1660,7 +1714,59 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
+                    initial_peak = float(np.median(agree))
+                    break
+            if initial_peak is not None:
+                break
+        if initial_peak is None:
+            return None
+
+        # Stage 2: refine — search ±3px around initial peak for deeper valley
+        refine_r = 3
+        ix2 = int(round(initial_peak))
+        refined_hits: list[tuple[bool, float]] = []
+        for idx in range(n):
+            row = int(round(ys[idx]))
+            if row < 0 or row >= img_h:
+                refined_hits.append((False, -1.0))
+                continue
+            best_lum = 256.0
+            best_x = -1
+            for sx in range(max(0, ix2 - refine_r), min(img_w, ix2 + refine_r + 1)):
+                lum = float(grayscale[row, sx])
+                if lum <= lum_thresh and lum < best_lum:
+                    best_lum = lum
+                    best_x = sx
+            if best_x >= 0:
+                x0 = best_x
+                xm1 = max(0, x0 - 1)
+                xp1 = min(img_w - 1, x0 + 1)
+                v_m1 = float(grayscale[row, xm1])
+                v_0 = float(grayscale[row, x0])
+                v_p1 = float(grayscale[row, xp1])
+                denom = v_m1 - 2.0 * v_0 + v_p1
+                if abs(denom) > 1e-6:
+                    offset = 0.5 * (v_m1 - v_p1) / denom
+                    offset = max(-0.5, min(0.5, offset))
+                else:
+                    offset = 0.0
+                refined_hits.append((True, float(x0) + offset + 0.5))
+            else:
+                refined_hits.append((False, -1.0))
+
+        # Consensus on refined hits
+        for tol in (dist_tol * 0.5, dist_tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [refined_hits[i][1] for i in range(start, end) if refined_hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                median = float(np.median(window))
+                agree = [v for v in window if abs(v - median) <= tol]
+                if len(agree) >= min_hits:
                     return float(np.median(agree))
+        # Fallback to stage 1 result
+        return initial_peak
         return None
 
     # -- Parallel line magnet detection defaults --
