@@ -1403,7 +1403,7 @@ class Canvas(QtWidgets.QWidget):
         "snap_range_pixels": 5,
         "sample_points": 11,
         "consecutive_window": 8,
-        "distance_tolerance": 0.5,
+        "distance_tolerance": 1.0,
     }
 
     def _detect_line_fit_snap(
@@ -1561,17 +1561,18 @@ class Canvas(QtWidgets.QWidget):
             else:
                 hits.append((False, -1.0))
 
-        # Consensus: sliding window
+        # Consensus: cascade from strict to relaxed tolerance
         min_hits = max(w - 1, (w + 1) // 2)
-        for start in range(max(n - w + 1, 1)):
-            end = min(start + w, n)
-            window = [hits[i][1] for i in range(start, end) if hits[i][0]]
-            if len(window) < min_hits:
-                continue
-            median = float(np.median(window))
-            agree = [v for v in window if abs(v - median) <= dist_tol]
-            if len(agree) >= min_hits:
-                return float(np.median(agree))
+        for tol in (dist_tol * 0.5, dist_tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [hits[i][1] for i in range(start, end) if hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                median = float(np.median(window))
+                agree = [v for v in window if abs(v - median) <= tol]
+                if len(agree) >= min_hits:
+                    return float(np.median(agree))
         return None
 
     def _find_line_peak_v(self, ys, ix, max_scan, grayscale, img_h, img_w,
@@ -1639,15 +1640,16 @@ class Canvas(QtWidgets.QWidget):
                 hits.append((False, -1.0))
 
         min_hits = max(w - 1, (w + 1) // 2)
-        for start in range(max(n - w + 1, 1)):
-            end = min(start + w, n)
-            window = [hits[i][1] for i in range(start, end) if hits[i][0]]
-            if len(window) < min_hits:
-                continue
-            median = float(np.median(window))
-            agree = [v for v in window if abs(v - median) <= dist_tol]
-            if len(agree) >= min_hits:
-                return float(np.median(agree))
+        for tol in (dist_tol * 0.5, dist_tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [hits[i][1] for i in range(start, end) if hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                median = float(np.median(window))
+                agree = [v for v in window if abs(v - median) <= tol]
+                if len(agree) >= min_hits:
+                    return float(np.median(agree))
         return None
 
     # -- Parallel line magnet detection defaults --
@@ -2037,20 +2039,21 @@ class Canvas(QtWidgets.QWidget):
             if not found:
                 hits.append((False, -1.0, -1.0))
 
-        # Slide window: require at least (w - 1) hits that agree on near_edge
+        # Slide window: cascade from strict to relaxed tolerance
         min_hits = max(w - 1, (w + 1) // 2)
-        for start in range(max(n - w + 1, 1)):
-            end = min(start + w, n)
-            window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
-            if len(window) < min_hits:
-                continue
-            near_positions = [ne for ne, _ in window]
-            median_near = float(np.median(near_positions))
-            agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= tol]
-            if len(agree_idx) >= min_hits:
-                near_edge = float(np.median([near_positions[j] for j in agree_idx]))
-                center = float(np.median([window[j][1] for j in agree_idx]))
-                return (near_edge, center)
+        for cur_tol in (tol * 0.5, tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                near_positions = [ne for ne, _ in window]
+                median_near = float(np.median(near_positions))
+                agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= cur_tol]
+                if len(agree_idx) >= min_hits:
+                    near_edge = float(np.median([near_positions[j] for j in agree_idx]))
+                    center = float(np.median([window[j][1] for j in agree_idx]))
+                    return (near_edge, center)
 
         return None
 
@@ -2119,20 +2122,21 @@ class Canvas(QtWidgets.QWidget):
             if not found:
                 hits.append((False, -1.0, -1.0))
 
-        # Slide window: require at least (w - 1) hits that agree on near_edge
+        # Slide window: cascade from strict to relaxed tolerance
         min_hits = max(w - 1, (w + 1) // 2)
-        for start in range(max(n - w + 1, 1)):
-            end = min(start + w, n)
-            window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
-            if len(window) < min_hits:
-                continue
-            near_positions = [ne for ne, _ in window]
-            median_near = float(np.median(near_positions))
-            agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= tol]
-            if len(agree_idx) >= min_hits:
-                near_edge = float(np.median([near_positions[j] for j in agree_idx]))
-                center = float(np.median([window[j][1] for j in agree_idx]))
-                return (near_edge, center)
+        for cur_tol in (tol * 0.5, tol):
+            for start in range(max(n - w + 1, 1)):
+                end = min(start + w, n)
+                window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+                if len(window) < min_hits:
+                    continue
+                near_positions = [ne for ne, _ in window]
+                median_near = float(np.median(near_positions))
+                agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= cur_tol]
+                if len(agree_idx) >= min_hits:
+                    near_edge = float(np.median([near_positions[j] for j in agree_idx]))
+                    center = float(np.median([window[j][1] for j in agree_idx]))
+                    return (near_edge, center)
 
         return None
 
