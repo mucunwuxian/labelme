@@ -654,6 +654,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Paste copied polygons"),
             enabled=False,
         )
+        copyFromPrevJson = action(
+            self.tr("直前JSONのシェイプを全複製"),
+            self.copyShapesFromPreviousJson,
+            None,
+            None,
+            self.tr(
+                "ファイル一覧を遡り、最初に見つかる保存済みJSONの"
+                "シェイプを全て複製"
+            ),
+            enabled=True,
+        )
         undoLastPoint = action(
             self.tr("Undo last point"),
             self.canvas.undoLastPoint,
@@ -1140,6 +1151,7 @@ class MainWindow(QtWidgets.QMainWindow):
             duplicate,
             copy,
             paste,
+            copyFromPrevJson,
             delete,
             None,
             undo,
@@ -2350,6 +2362,66 @@ class MainWindow(QtWidgets.QMainWindow):
     def copySelectedShape(self):
         self._copied_shapes = [s.copy() for s in self.canvas.selectedShapes]
         self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
+
+    def copyShapesFromPreviousJson(self):
+        """Copy all shapes from the nearest previous file that has a saved JSON."""
+        current_row = self.fileListWidget.currentRow()
+        if current_row < 0:
+            return
+
+        for i in range(current_row - 1, -1, -1):
+            item = self.fileListWidget.item(i)
+            prev_path = item.data(Qt.UserRole) or item.text()
+            label_file = f"{osp.splitext(prev_path)[0]}.json"
+            if self.output_dir:
+                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            if not osp.exists(label_file):
+                continue
+            try:
+                lf = LabelFile(label_file)
+            except LabelFileError:
+                continue
+            if not lf.shapes:
+                continue
+            # Convert ShapeDicts to Shape objects
+            shapes: list[Shape] = []
+            for sd in lf.shapes:
+                shape = Shape(
+                    label=sd["label"],
+                    shape_type=sd["shape_type"],
+                    group_id=sd["group_id"],
+                    description=sd.get("description", ""),
+                    mask=sd.get("mask"),
+                )
+                points = sd["points"]
+                if sd["shape_type"] == "rectangle" and len(points) == 4:
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    points = [[min(xs), min(ys)], [max(xs), max(ys)]]
+                for x, y in points:
+                    shape.addPoint(QtCore.QPointF(x, y))
+                shape.close()
+                default_flags = {}
+                if self._config["label_flags"]:
+                    for pattern, keys in self._config["label_flags"].items():
+                        if isinstance(shape.label, str) and re.match(
+                            pattern, shape.label
+                        ):
+                            for key in keys:
+                                default_flags[key] = False
+                shape.flags = default_flags
+                shape.flags.update(sd.get("flags", {}))
+                shape.other_data = sd.get("other_data", {})
+                shapes.append(shape)
+            self._load_shapes(shapes=shapes, replace=False)
+            self.setDirty()
+            return
+
+        QtWidgets.QMessageBox.warning(
+            self,
+            self.tr("エラー"),
+            self.tr("保存されたJSONが存在しません。"),
+        )
 
     def _label_selection_changed(self) -> None:
         selected_shapes: list[Shape] = []
