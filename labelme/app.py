@@ -2076,6 +2076,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.labelList.selectItem(item)
             self.labelList.scrollToItem(item)
         self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
+        self.canvas.sortShapesByArea()
         n_selected = len(selected_shapes)
         self.actions.delete.setEnabled(n_selected)
         self.actions.duplicate.setEnabled(n_selected)

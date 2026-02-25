@@ -2509,10 +2509,17 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
+        selected_shapes = []
         for shape in self._shapes_paint_order:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
-                shape.paint(p)
+                if shape.selected:
+                    selected_shapes.append(shape)
+                else:
+                    shape.paint(p)
+        # Draw selected shapes last so they appear on top
+        for shape in selected_shapes:
+            shape.paint(p)
         if self.current:
             self.current.paint(p)
             # Don't paint preview line when near start point (hide cursor square)
@@ -3001,10 +3008,11 @@ class Canvas(QtWidgets.QWidget):
                 -(s.boundingRect().width() * s.boundingRect().height()),
             ),
         )
-        # Hover order: smallest first, points first (priority for selection)
+        # Hover order: selected first, then smallest first, points first
         self._shapes_hover_order = sorted(
             self.shapes,
             key=lambda s: (
+                0 if s.selected else 1,
                 0 if s.shape_type == "point" else 1,
                 s.boundingRect().width() * s.boundingRect().height(),
             ),
