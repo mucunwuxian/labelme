@@ -313,6 +313,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._text_bounding_toggled
         )
 
+        self.lineFitCheckbox = QtWidgets.QCheckBox()
+        self.lineFitCheckbox.toggled.connect(
+            self._line_fit_toggled
+        )
+
         self.darkPixelMagnetCheckbox = QtWidgets.QCheckBox()
         self.darkPixelMagnetCheckbox.toggled.connect(
             self._dark_pixel_magnet_toggled
@@ -335,6 +340,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.canvas.setTextBoundingMagnetConfig(
             self._config.get("text_bounding_magnet", [])
+        )
+        self.canvas.setLineFitMagnetConfig(
+            self._config.get("line_fit_magnet", [])
         )
         self.canvas.setDarkPixelMagnetConfig(
             self._config.get("dark_pixel_magnet", [])
@@ -702,6 +710,13 @@ class MainWindow(QtWidgets.QMainWindow):
             checked=False,
         )
 
+        showLineFit = action(
+            self.tr("直線とのフィットを表示"),
+            self._toggle_line_fit_visible,
+            checkable=True,
+            checked=False,
+        )
+
         showDarkPixelMagnet = action(
             self.tr("カーソル配下色制御を表示"),
             self._toggle_dark_pixel_magnet_visible,
@@ -852,6 +867,19 @@ class MainWindow(QtWidgets.QMainWindow):
         textBounding.defaultWidget().setLayout(textBoundingBoxLayout)
         textBounding.setVisible(False)
         self._textBoundingAction = textBounding
+
+        lineFit = QtWidgets.QWidgetAction(self)
+        lineFitBoxLayout = QtWidgets.QVBoxLayout()
+        lineFitLabel = QtWidgets.QLabel(self.tr("直線との\nフィット"))
+        lineFitLabel.setAlignment(Qt.AlignCenter)
+        lineFitBoxLayout.addWidget(lineFitLabel)
+        lineFitBoxLayout.addWidget(
+            self.lineFitCheckbox, alignment=Qt.AlignCenter
+        )
+        lineFit.setDefaultWidget(QtWidgets.QWidget())
+        lineFit.defaultWidget().setLayout(lineFitBoxLayout)
+        lineFit.setVisible(False)
+        self._lineFitAction = lineFit
 
         darkPixelMagnet = QtWidgets.QWidgetAction(self)
         darkPixelMagnetBoxLayout = QtWidgets.QVBoxLayout()
@@ -1057,6 +1085,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showRedo=showRedo,
             showParallelLineDist=showParallelLineDist,
             showTextBounding=showTextBounding,
+            showLineFit=showLineFit,
             showDarkPixelMagnet=showDarkPixelMagnet,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
@@ -1180,6 +1209,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.actions.toggle_keep_prev_brightness_contrast,
                 None,
                 showRedo,
+                showLineFit,
                 showParallelLineDist,
                 showTextBounding,
                 showDarkPixelMagnet,
@@ -1245,6 +1275,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     customCursor,
                     rightClickEdit,
                     skipDeleteConfirm,
+                    lineFit,
                     parallelLineDist,
                     textBounding,
                     darkPixelMagnet,
@@ -1374,6 +1405,23 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.actions.showTextBounding.setChecked(showTextBoundingEnabled)
         self._toggle_text_bounding_visible(showTextBoundingEnabled)
+        lineFitEnabled = self.settings.value(
+            "canvas/lineFit", False, type=bool
+        )
+        self.lineFitCheckbox.blockSignals(True)
+        self.lineFitCheckbox.setChecked(lineFitEnabled)
+        self.lineFitCheckbox.blockSignals(False)
+        # Mutual exclusion: if both line fit and parallel line are on,
+        # keep line fit and turn off parallel line.
+        if lineFitEnabled and self.parallelLineDistCheckbox.isChecked():
+            self.parallelLineDistCheckbox.setChecked(False)
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setLineFitEnabled(lineFitEnabled)
+        showLineFitEnabled = self.settings.value(
+            "view/showLineFit", False, type=bool
+        )
+        self.actions.showLineFit.setChecked(showLineFitEnabled)
+        self._toggle_line_fit_visible(showLineFitEnabled)
         darkPixelMagnetEnabled = self.settings.value(
             "canvas/darkPixelMagnet", False, type=bool
         )
@@ -2639,6 +2687,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.update()
 
     def _parallel_line_dist_toggled(self, checked: bool) -> None:
+        if checked and hasattr(self, "lineFitCheckbox") and self.lineFitCheckbox.isChecked():
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("排他機能"),
+                self.tr("「直線とのフィット」と同時に有効化はできません。"),
+            )
+            self.parallelLineDistCheckbox.setChecked(False)
+            return
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.setParallelLineDistEnabled(checked)
 
@@ -2671,6 +2727,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_text_bounding_visible(self, checked: bool) -> None:
         if hasattr(self, "_textBoundingAction"):
             self._textBoundingAction.setVisible(checked)
+
+    def _line_fit_toggled(self, checked: bool) -> None:
+        if checked and hasattr(self, "parallelLineDistCheckbox") and self.parallelLineDistCheckbox.isChecked():
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("排他機能"),
+                self.tr("「平行直線との距離調整」と同時に有効化はできません。"),
+            )
+            self.lineFitCheckbox.setChecked(False)
+            return
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setLineFitEnabled(checked)
+
+    def _toggle_line_fit_visible(self, checked: bool) -> None:
+        if hasattr(self, "_lineFitAction"):
+            self._lineFitAction.setVisible(checked)
 
     def _dark_pixel_magnet_toggled(self, checked: bool) -> None:
         if hasattr(self, "canvas") and self.canvas is not None:
@@ -2974,6 +3046,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "view/showTextBounding",
             self.actions.showTextBounding.isChecked(),
+        )
+        self.settings.setValue(
+            "canvas/lineFit",
+            self.lineFitCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showLineFit",
+            self.actions.showLineFit.isChecked(),
         )
         self.settings.setValue(
             "canvas/darkPixelMagnet",

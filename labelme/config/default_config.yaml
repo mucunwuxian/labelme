@@ -109,6 +109,18 @@ parallel_line_magnet: []
 #       min_agreement: 6
 text_bounding_magnet: []
 
+# Line fit magnet: rectangle edge snaps directly onto detected line peaks.
+# Scans both perpendicular directions to find the darkest point (luminance peak).
+# Only active for rectangle edge midpoint drag with matching target_label.
+# Shift key cancels snap during drag.
+# Example:
+#   line_fit_magnet:
+#     - target_label: "notes"
+#       resize_base: 2560           # letterbox resize reference (longer side)
+#       snap_range_pixels: 5        # ±snap zone (at resize_base scale)
+#       luminance_threshold: 128    # luminance diff from base to detect line
+line_fit_magnet: []
+
 # Dark pixel magnet: cursor snaps to dark pixels during vertex drag / shape drawing.
 # Only active for shapes with matching target_label.
 # Shift key cancels snap during drag.

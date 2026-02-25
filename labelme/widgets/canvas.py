@@ -151,6 +151,9 @@ class Canvas(QtWidgets.QWidget):
         self._right_click_edit_enabled = False
         self._parallel_line_dist_enabled = False
         self._text_bounding_enabled = False
+        self._line_fit_enabled = False
+        self._lf_snap_cache: tuple | None = None
+        self._lf_snap_entered = False
         self._dark_pixel_magnet_enabled = False
         self._dpm_ghost_pos: QPointF | None = None  # real mouse pos during DPM snap
         self._text_bounding_snap_dots: list[tuple[float, float]] | None = None
@@ -160,6 +163,7 @@ class Canvas(QtWidgets.QWidget):
         self._pl_snap_entered = False  # True on first frame of snap (triggers cursor warp)
         self._parallel_line_magnet_config: list[dict] = []
         self._text_bounding_magnet_config: list[dict] = []
+        self._line_fit_magnet_config: list[dict] = []
         self._reference_medians: dict[str, float | None] = {}
         self._dark_pixel_magnet_config: list[dict] | None = None
         self._pending_draw_label: str | None = None
@@ -304,6 +308,12 @@ class Canvas(QtWidgets.QWidget):
 
     def setTextBoundingMagnetConfig(self, config: list[dict]):
         self._text_bounding_magnet_config = config
+
+    def setLineFitEnabled(self, enabled: bool):
+        self._line_fit_enabled = enabled
+
+    def setLineFitMagnetConfig(self, config: list[dict]):
+        self._line_fit_magnet_config = config
 
     def setReferenceMedians(self, medians: dict[str, float | None]):
         self._reference_medians = medians
@@ -1351,7 +1361,23 @@ class Canvas(QtWidgets.QWidget):
                         self._warp_cursor_to_image_pos(snap_pos)
                     break
 
-        # Text bounding snap: try each rule (only if parallel line didn't snap)
+        # Line fit snap: snap edge directly onto detected line peak
+        if not self._snap_active and self._line_fit_enabled:
+            for rule in self._line_fit_magnet_config:
+                if self.hShape.label != rule.get("target_label"):
+                    continue
+                result = self._detect_line_fit_snap(
+                    rule, self.hShape, self.hEdgeMidpoint, pos,
+                )
+                if result is not None:
+                    snap_pos, line_pos = result
+                    self._snap_active = True
+                    self._snap_line_pos = line_pos
+                    if self._lf_snap_entered:
+                        self._warp_cursor_to_image_pos(snap_pos)
+                    break
+
+        # Text bounding snap: try each rule (only if no other snap active)
         if not self._snap_active and self._text_bounding_enabled:
             for i, rule in enumerate(self._text_bounding_magnet_config):
                 if self.hShape.label != rule.get("target_label"):
@@ -1369,6 +1395,242 @@ class Canvas(QtWidgets.QWidget):
         # (else: parallel line snap active or text bounding disabled — skip)
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+
+    # -- Line fit magnet defaults --
+    _LF_DEFAULTS = {
+        "luminance_threshold": 128,
+        "resize_base": 2560,
+        "snap_range_pixels": 5,
+        "sample_points": 11,
+        "consecutive_window": 8,
+        "distance_tolerance": 0.5,
+    }
+
+    def _detect_line_fit_snap(
+        self,
+        rule: dict,
+        shape,
+        edge_index: int,
+        cursor_pos: QPointF,
+    ) -> tuple[QPointF, float] | None:
+        """Detect a line near the edge and snap directly onto its luminance peak.
+
+        Scans both perpendicular directions from the edge. Finds the darkest
+        point (luminance peak) using parabolic sub-pixel interpolation.
+        Returns (snapped_pos, peak_pos_for_guide) or None.
+        """
+        from labelme.shape import Shape
+
+        d = self._LF_DEFAULTS
+        snap_range_px = rule.get("snap_range_pixels", d["snap_range_pixels"])
+        sample_points = rule.get("sample_points", d["sample_points"])
+        consec_window = rule.get("consecutive_window", d["consecutive_window"])
+        dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
+        lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
+        resize_base = rule.get("resize_base", d["resize_base"])
+
+        grayscale = self._grayscale_cache
+        img_h, img_w = grayscale.shape
+        scale = max(img_w, img_h) / resize_base
+        snap_window = snap_range_px * scale
+        max_scan = max(int(snap_window * 3), 50)
+
+        is_horiz = edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM)
+        cursor_val = cursor_pos.y() if is_horiz else cursor_pos.x()
+
+        # Cache: stay locked within snap zone
+        cache = self._lf_snap_cache
+        if cache is not None and cache[0] == edge_index:
+            cached_snap_val = cache[1]
+            cached_peak_pos = cache[2]
+            if abs(cursor_val - cached_snap_val) <= snap_window:
+                self._lf_snap_entered = False
+                if is_horiz:
+                    return (QPointF(cursor_pos.x(), cached_snap_val), cached_peak_pos)
+                else:
+                    return (QPointF(cached_snap_val, cursor_pos.y()), cached_peak_pos)
+            else:
+                self._lf_snap_cache = None
+                self._lf_snap_entered = False
+
+        p0, p1 = shape.points[0], shape.points[1]
+        left = min(p0.x(), p1.x())
+        right = max(p0.x(), p1.x())
+        top = min(p0.y(), p1.y())
+        bottom = max(p0.y(), p1.y())
+
+        if is_horiz:
+            edge_val = bottom if edge_index == Shape.EDGE_BOTTOM else top
+            xs = np.linspace(left, right, sample_points + 2)[1:-1]
+            iy = int(round(edge_val))
+            if iy < 0 or iy >= img_h:
+                self._lf_snap_entered = False
+                return None
+            peak = self._find_line_peak_h(
+                xs, iy, max_scan, grayscale, img_h, img_w,
+                consec_window, dist_tol, lum_thresh,
+            )
+            if peak is not None:
+                dist = abs(peak - cursor_pos.y())
+                if dist <= snap_window:
+                    self._lf_snap_cache = (edge_index, peak, peak)
+                    self._lf_snap_entered = True
+                    return (QPointF(cursor_pos.x(), peak), peak)
+        else:
+            edge_val = left if edge_index == Shape.EDGE_LEFT else right
+            ys = np.linspace(top, bottom, sample_points + 2)[1:-1]
+            ix = int(round(edge_val))
+            if ix < 0 or ix >= img_w:
+                self._lf_snap_entered = False
+                return None
+            peak = self._find_line_peak_v(
+                ys, ix, max_scan, grayscale, img_h, img_w,
+                consec_window, dist_tol, lum_thresh,
+            )
+            if peak is not None:
+                dist = abs(peak - cursor_pos.x())
+                if dist <= snap_window:
+                    self._lf_snap_cache = (edge_index, peak, peak)
+                    self._lf_snap_entered = True
+                    return (QPointF(peak, cursor_pos.y()), peak)
+
+        self._lf_snap_entered = False
+        return None
+
+    def _find_line_peak_h(self, xs, iy, max_scan, grayscale, img_h, img_w,
+                          consec_window, dist_tol, lum_thresh):
+        """Find horizontal line peak by scanning both vertical directions.
+
+        For each sample x, scans up and down from iy to find the darkest
+        point (minimum luminance) that exceeds lum_thresh difference from base.
+        Uses parabolic interpolation for sub-pixel peak.
+        Returns median peak y-position or None.
+        """
+        n = len(xs)
+        w = min(consec_window, n)
+        hits: list[tuple[bool, float]] = []
+
+        for idx in range(n):
+            col = int(round(xs[idx]))
+            if col < 0 or col >= img_w:
+                hits.append((False, -1.0))
+                continue
+            base_lum = float(grayscale[iy, col])
+            best_lum = base_lum
+            best_y = iy
+            # Scan both directions
+            for scan_dir in (+1, -1):
+                found_dark = False
+                for d in range(1, max_scan + 1):
+                    sy = iy + scan_dir * d
+                    if sy < 0 or sy >= img_h:
+                        break
+                    lum = float(grayscale[sy, col])
+                    if lum < best_lum:
+                        best_lum = lum
+                        best_y = sy
+                    if abs(lum - base_lum) > lum_thresh:
+                        found_dark = True
+                    # Stop only after passing through dark region
+                    if found_dark and abs(lum - base_lum) <= lum_thresh * 0.3:
+                        break
+
+            if abs(best_lum - base_lum) > lum_thresh:
+                # Parabolic sub-pixel interpolation around the peak
+                y0 = best_y
+                ym1 = max(0, y0 - 1)
+                yp1 = min(img_h - 1, y0 + 1)
+                v_m1 = float(grayscale[ym1, col])
+                v_0 = float(grayscale[y0, col])
+                v_p1 = float(grayscale[yp1, col])
+                denom = v_m1 - 2.0 * v_0 + v_p1
+                if abs(denom) > 1e-6:
+                    offset = 0.5 * (v_m1 - v_p1) / denom
+                    offset = max(-0.5, min(0.5, offset))
+                else:
+                    offset = 0.0
+                refined = float(y0) + offset + 0.5  # +0.5 for pixel center
+                hits.append((True, refined))
+            else:
+                hits.append((False, -1.0))
+
+        # Consensus: sliding window
+        min_hits = max(w - 1, (w + 1) // 2)
+        for start in range(max(n - w + 1, 1)):
+            end = min(start + w, n)
+            window = [hits[i][1] for i in range(start, end) if hits[i][0]]
+            if len(window) < min_hits:
+                continue
+            median = float(np.median(window))
+            agree = [v for v in window if abs(v - median) <= dist_tol]
+            if len(agree) >= min_hits:
+                return float(np.median(agree))
+        return None
+
+    def _find_line_peak_v(self, ys, ix, max_scan, grayscale, img_h, img_w,
+                          consec_window, dist_tol, lum_thresh):
+        """Find vertical line peak by scanning both horizontal directions.
+
+        Same logic as _find_line_peak_h but scanning left/right.
+        Returns median peak x-position or None.
+        """
+        n = len(ys)
+        w = min(consec_window, n)
+        hits: list[tuple[bool, float]] = []
+
+        for idx in range(n):
+            row = int(round(ys[idx]))
+            if row < 0 or row >= img_h:
+                hits.append((False, -1.0))
+                continue
+            base_lum = float(grayscale[row, ix])
+            best_lum = base_lum
+            best_x = ix
+            for scan_dir in (+1, -1):
+                found_dark = False
+                for d in range(1, max_scan + 1):
+                    sx = ix + scan_dir * d
+                    if sx < 0 or sx >= img_w:
+                        break
+                    lum = float(grayscale[row, sx])
+                    if lum < best_lum:
+                        best_lum = lum
+                        best_x = sx
+                    if abs(lum - base_lum) > lum_thresh:
+                        found_dark = True
+                    # Stop only after passing through dark region
+                    if found_dark and abs(lum - base_lum) <= lum_thresh * 0.3:
+                        break
+
+            if abs(best_lum - base_lum) > lum_thresh:
+                x0 = best_x
+                xm1 = max(0, x0 - 1)
+                xp1 = min(img_w - 1, x0 + 1)
+                v_m1 = float(grayscale[row, xm1])
+                v_0 = float(grayscale[row, x0])
+                v_p1 = float(grayscale[row, xp1])
+                denom = v_m1 - 2.0 * v_0 + v_p1
+                if abs(denom) > 1e-6:
+                    offset = 0.5 * (v_m1 - v_p1) / denom
+                    offset = max(-0.5, min(0.5, offset))
+                else:
+                    offset = 0.0
+                refined = float(x0) + offset + 0.5
+                hits.append((True, refined))
+            else:
+                hits.append((False, -1.0))
+
+        min_hits = max(w - 1, (w + 1) // 2)
+        for start in range(max(n - w + 1, 1)):
+            end = min(start + w, n)
+            window = [hits[i][1] for i in range(start, end) if hits[i][0]]
+            if len(window) < min_hits:
+                continue
+            median = float(np.median(window))
+            agree = [v for v in window if abs(v - median) <= dist_tol]
+            if len(agree) >= min_hits:
+                return float(np.median(agree))
+        return None
 
     # -- Parallel line magnet detection defaults --
     _PL_DEFAULTS = {
@@ -2881,6 +3143,7 @@ class Canvas(QtWidgets.QWidget):
         self._text_bounding_snap_dots = None
         self._tb_boundary_cache = None
         self._pl_snap_cache = None
+        self._lf_snap_cache = None
         self._pending_draw_label = None
         self._dpm_ghost_pos = None
         self._dpm_coarse_cache = None
