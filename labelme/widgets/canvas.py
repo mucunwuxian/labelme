@@ -1460,9 +1460,8 @@ class Canvas(QtWidgets.QWidget):
         bottom = max(p0.y(), p1.y())
 
         if is_horiz:
-            edge_val = bottom if edge_index == Shape.EDGE_BOTTOM else top
             xs = np.linspace(left, right, sample_points + 2)[1:-1]
-            iy = int(round(edge_val))
+            iy = int(round(cursor_pos.y()))
             if iy < 0 or iy >= img_h:
                 self._lf_snap_entered = False
                 return None
@@ -1477,9 +1476,8 @@ class Canvas(QtWidgets.QWidget):
                     self._lf_snap_entered = True
                     return (QPointF(cursor_pos.x(), peak), peak)
         else:
-            edge_val = left if edge_index == Shape.EDGE_LEFT else right
             ys = np.linspace(top, bottom, sample_points + 2)[1:-1]
-            ix = int(round(edge_val))
+            ix = int(round(cursor_pos.x()))
             if ix < 0 or ix >= img_w:
                 self._lf_snap_entered = False
                 return None
@@ -1502,8 +1500,8 @@ class Canvas(QtWidgets.QWidget):
         """Find horizontal line peak by scanning both vertical directions.
 
         For each sample x, scans up and down from iy to find the darkest
-        point (minimum luminance) that exceeds lum_thresh difference from base.
-        Uses parabolic interpolation for sub-pixel peak.
+        pixel with luminance <= lum_thresh (absolute threshold).
+        Uses parabolic interpolation for sub-pixel valley.
         Returns median peak y-position or None.
         """
         n = len(xs)
@@ -1515,28 +1513,37 @@ class Canvas(QtWidgets.QWidget):
             if col < 0 or col >= img_w:
                 hits.append((False, -1.0))
                 continue
-            base_lum = float(grayscale[iy, col])
-            best_lum = base_lum
-            best_y = iy
-            # Scan both directions
+            # Check center pixel
+            center_lum = float(grayscale[iy, col])
+            candidates = []
+            if center_lum <= lum_thresh:
+                candidates.append((center_lum, iy, 0))
+            # Scan both directions independently
             for scan_dir in (+1, -1):
-                found_dark = False
+                dir_best_lum = 256.0
+                dir_best_y = -1
+                entered_dark = False
                 for d in range(1, max_scan + 1):
                     sy = iy + scan_dir * d
                     if sy < 0 or sy >= img_h:
                         break
                     lum = float(grayscale[sy, col])
-                    if lum < best_lum:
-                        best_lum = lum
-                        best_y = sy
-                    if abs(lum - base_lum) > lum_thresh:
-                        found_dark = True
-                    # Stop only after passing through dark region
-                    if found_dark and abs(lum - base_lum) <= lum_thresh * 0.3:
+                    if lum <= lum_thresh:
+                        entered_dark = True
+                        if lum < dir_best_lum:
+                            dir_best_lum = lum
+                            dir_best_y = sy
+                    # Stop after passing through dark region
+                    if entered_dark and lum > lum_thresh:
                         break
+                if dir_best_y >= 0:
+                    candidates.append((dir_best_lum, dir_best_y, abs(dir_best_y - iy)))
 
-            if abs(best_lum - base_lum) > lum_thresh:
-                # Parabolic sub-pixel interpolation around the peak
+            if candidates:
+                # Pick nearest to cursor; tie-break by darkest
+                candidates.sort(key=lambda c: (c[2], c[0]))
+                best_y = candidates[0][1]
+                # Parabolic sub-pixel interpolation around the valley
                 y0 = best_y
                 ym1 = max(0, y0 - 1)
                 yp1 = min(img_h - 1, y0 + 1)
@@ -1572,6 +1579,7 @@ class Canvas(QtWidgets.QWidget):
         """Find vertical line peak by scanning both horizontal directions.
 
         Same logic as _find_line_peak_h but scanning left/right.
+        Uses absolute luminance threshold.
         Returns median peak x-position or None.
         """
         n = len(ys)
@@ -1583,26 +1591,36 @@ class Canvas(QtWidgets.QWidget):
             if row < 0 or row >= img_h:
                 hits.append((False, -1.0))
                 continue
-            base_lum = float(grayscale[row, ix])
-            best_lum = base_lum
-            best_x = ix
+            # Check center pixel
+            center_lum = float(grayscale[row, ix])
+            candidates = []
+            if center_lum <= lum_thresh:
+                candidates.append((center_lum, ix, 0))
+            # Scan both directions independently
             for scan_dir in (+1, -1):
-                found_dark = False
+                dir_best_lum = 256.0
+                dir_best_x = -1
+                entered_dark = False
                 for d in range(1, max_scan + 1):
                     sx = ix + scan_dir * d
                     if sx < 0 or sx >= img_w:
                         break
                     lum = float(grayscale[row, sx])
-                    if lum < best_lum:
-                        best_lum = lum
-                        best_x = sx
-                    if abs(lum - base_lum) > lum_thresh:
-                        found_dark = True
-                    # Stop only after passing through dark region
-                    if found_dark and abs(lum - base_lum) <= lum_thresh * 0.3:
+                    if lum <= lum_thresh:
+                        entered_dark = True
+                        if lum < dir_best_lum:
+                            dir_best_lum = lum
+                            dir_best_x = sx
+                    # Stop after passing through dark region
+                    if entered_dark and lum > lum_thresh:
                         break
+                if dir_best_x >= 0:
+                    candidates.append((dir_best_lum, dir_best_x, abs(dir_best_x - ix)))
 
-            if abs(best_lum - base_lum) > lum_thresh:
+            if candidates:
+                # Pick nearest to cursor; tie-break by darkest
+                candidates.sort(key=lambda c: (c[2], c[0]))
+                best_x = candidates[0][1]
                 x0 = best_x
                 xm1 = max(0, x0 - 1)
                 xp1 = min(img_w - 1, x0 + 1)
