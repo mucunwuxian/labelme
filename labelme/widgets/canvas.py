@@ -752,7 +752,11 @@ class Canvas(QtWidgets.QWidget):
         # - Highlight vertex
         # Update shape/vertex fill and tooltip value accordingly.
         status_messages: list[str] = []
-        for shape in self._shapes_hover_order:
+        # Iterate selected shapes first, then the rest (by hover order)
+        _hover_iter = [
+            s for s in self.selectedShapes if s in self._shapes_hover_order
+        ] + [s for s in self._shapes_hover_order if s not in self.selectedShapes]
+        for shape in _hover_iter:
             if not self.isVisible(shape):
                 continue
             # Look for a nearby vertex to highlight. If that fails,
@@ -979,9 +983,16 @@ class Canvas(QtWidgets.QWidget):
                 ):
                     self.removeSelectedPoint()
 
-                # If no hover vertex is set, resolve the nearest vertex on click
-                if self.hVertex is None:
-                    for shape in self._shapes_hover_order:
+                # If no hover vertex/edge midpoint is set, resolve nearest vertex
+                if self.hVertex is None and self.hEdgeMidpoint is None:
+                    _click_iter = [
+                        s for s in self.selectedShapes
+                        if s in self._shapes_hover_order
+                    ] + [
+                        s for s in self._shapes_hover_order
+                        if s not in self.selectedShapes
+                    ]
+                    for shape in _click_iter:
                         if not self.isVisible(shape):
                             continue
                         index = shape.nearestVertex(pos, self.epsilon)
