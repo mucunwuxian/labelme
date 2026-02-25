@@ -2412,6 +2412,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 shape.flags = default_flags
                 shape.flags.update(sd.get("flags", {}))
                 shape.other_data = sd.get("other_data", {})
+                shape.modified_at = None  # Mark as not yet updated
                 shapes.append(shape)
             self._load_shapes(shapes=shapes, replace=False)
             self.setDirty()
