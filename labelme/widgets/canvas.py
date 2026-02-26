@@ -124,6 +124,7 @@ class Canvas(QtWidgets.QWidget):
                 f"Unexpected value for double_click event: {self.double_click}"
             )
         self.num_backups = kwargs.pop("num_backups", 10)
+        self._auto_fit_tolerance_sq = kwargs.pop("auto_fit_tolerance", 0.2) ** 2
         self._crosshair = kwargs.pop(
             "crosshair",
             {
@@ -757,11 +758,11 @@ class Canvas(QtWidgets.QWidget):
                     and self.hShape
                     and not is_shift_pressed
                 ):
-                    # Re-detect when cursor moved ≥0.1px from last detection
+                    # Re-detect when cursor moved ≥ tolerance from last detection
                     lp = self._auto_fit_last_detect_pos
                     if lp is None or (
                         (pos.x() - lp.x()) ** 2 + (pos.y() - lp.y()) ** 2
-                        >= 0.01  # 0.1px squared
+                        >= self._auto_fit_tolerance_sq
                     ):
                         self._autoFitDetectAndStore(self.hShape, merge=True)
                         self._auto_fit_last_detect_pos = QPointF(pos)

@@ -332,6 +332,7 @@ class MainWindow(QtWidgets.QMainWindow):
             double_click=self._config["canvas"]["double_click"],
             num_backups=self._config["canvas"]["num_backups"],
             crosshair=self._config["canvas"]["crosshair"],
+            auto_fit_tolerance=self._config["canvas"].get("auto_fit_tolerance", 0.2),
         )
         self.canvas.zoomRequest.connect(self._zoom_requested)
         self.canvas.pinchZoomRequest.connect(self._pinch_zoom_requested)
