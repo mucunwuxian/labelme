@@ -303,6 +303,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.skipDeleteConfirmCheckbox = QtWidgets.QCheckBox()
 
+        self.skipSaveNameConfirmCheckbox = QtWidgets.QCheckBox()
+
         self.parallelLineDistCheckbox = QtWidgets.QCheckBox()
         self.parallelLineDistCheckbox.toggled.connect(
             self._parallel_line_dist_toggled
@@ -862,6 +864,18 @@ class MainWindow(QtWidgets.QMainWindow):
         skipDeleteConfirm.setDefaultWidget(QtWidgets.QWidget())
         skipDeleteConfirm.defaultWidget().setLayout(skipDeleteConfirmBoxLayout)
 
+        # Skip save name confirmation checkbox widget
+        skipSaveNameConfirm = QtWidgets.QWidgetAction(self)
+        skipSaveNameConfirmBoxLayout = QtWidgets.QVBoxLayout()
+        skipSaveNameConfirmLabel = QtWidgets.QLabel(self.tr("保存名称\n確認不要"))
+        skipSaveNameConfirmLabel.setAlignment(Qt.AlignCenter)
+        skipSaveNameConfirmBoxLayout.addWidget(skipSaveNameConfirmLabel)
+        skipSaveNameConfirmBoxLayout.addWidget(
+            self.skipSaveNameConfirmCheckbox, alignment=Qt.AlignCenter
+        )
+        skipSaveNameConfirm.setDefaultWidget(QtWidgets.QWidget())
+        skipSaveNameConfirm.defaultWidget().setLayout(skipSaveNameConfirmBoxLayout)
+
         # Parallel line distance adjustment checkbox widget
         parallelLineDist = QtWidgets.QWidgetAction(self)
         parallelLineDistBoxLayout = QtWidgets.QVBoxLayout()
@@ -1301,6 +1315,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     customCursor,
                     rightClickEdit,
                     skipDeleteConfirm,
+                    skipSaveNameConfirm,
                     lineFit,
                     parallelLineDist,
                     textBounding,
@@ -1410,6 +1425,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "canvas/skipDeleteConfirm", False, type=bool
         )
         self.skipDeleteConfirmCheckbox.setChecked(skipDeleteConfirmEnabled)
+        skipSaveNameConfirmEnabled = self.settings.value(
+            "canvas/skipSaveNameConfirm", False, type=bool
+        )
+        self.skipSaveNameConfirmCheckbox.setChecked(skipSaveNameConfirmEnabled)
         parallelLineDistEnabled = self.settings.value(
             "canvas/parallelLineDist", False, type=bool
         )
@@ -3125,6 +3144,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.skipDeleteConfirmCheckbox.isChecked(),
         )
         self.settings.setValue(
+            "canvas/skipSaveNameConfirm",
+            self.skipSaveNameConfirmCheckbox.isChecked(),
+        )
+        self.settings.setValue(
             "canvas/parallelLineDist",
             self.parallelLineDistCheckbox.isChecked(),
         )
@@ -3292,7 +3315,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._saveFile(self.output_file)
             self.close()
         elif self.filename:
-            self._saveFile(self.saveFileDialog())
+            if self.skipSaveNameConfirmCheckbox.isChecked():
+                # Auto-derive JSON filename from image filename
+                base = osp.splitext(self.filename)[0]
+                if self.output_dir:
+                    base = osp.join(
+                        self.output_dir, osp.basename(base)
+                    )
+                self._saveFile(base + LabelFile.suffix)
+            else:
+                self._saveFile(self.saveFileDialog())
         else:
             # No filename set, cannot save
             logger.warning("Cannot save: no filename set")
