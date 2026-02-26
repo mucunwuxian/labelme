@@ -732,7 +732,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         showLineFit = action(
-            self.tr("直線とのフィットを表示"),
+            self.tr("直線へのフィットを表示"),
             self._toggle_line_fit_visible,
             checkable=True,
             checked=False,
@@ -2782,7 +2782,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self,
                 self.tr("排他機能"),
-                self.tr("「直線とのフィット」と同時に有効化はできません。"),
+                self.tr("「直線へのフィット」と同時に有効化はできません。"),
             )
             self.parallelLineDistCheckbox.setChecked(False)
             return

@@ -1437,7 +1437,7 @@ class Canvas(QtWidgets.QWidget):
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
 
     # Auto-fit range multiplier (applied to snap_range_pixels)
-    _AUTO_FIT_RANGE_MULT = 3
+    _AUTO_FIT_RANGE_MULT = 2
 
     def _autoFitDetect(self, shape):
         """Detect auto-fit snap positions for all edges (preview only, no shape change).
@@ -1542,7 +1542,7 @@ class Canvas(QtWidgets.QWidget):
         "luminance_threshold": 128,
         "resize_base": 2560,
         "snap_range_pixels": 5,
-        "sample_points": 11,
+        "sample_points": 21,
         "consecutive_window": 8,
         "distance_tolerance": 1.0,
     }
@@ -1636,116 +1636,134 @@ class Canvas(QtWidgets.QWidget):
         self._lf_snap_entered = False
         return None
 
+    @staticmethod
+    def _subpix_y(y0, col, grayscale, img_h):
+        """Parabolic sub-pixel interpolation for a valley at row y0."""
+        ym = max(0, y0 - 1)
+        yp = min(img_h - 1, y0 + 1)
+        vm = float(grayscale[ym, col])
+        v0 = float(grayscale[y0, col])
+        vp = float(grayscale[yp, col])
+        d = vm - 2.0 * v0 + vp
+        off = 0.5 * (vm - vp) / d if abs(d) > 1e-6 else 0.0
+        return float(y0) + max(-0.5, min(0.5, off)) + 0.5
+
+    @staticmethod
+    def _subpix_x(x0, row, grayscale, img_w):
+        """Parabolic sub-pixel interpolation for a valley at col x0."""
+        xm = max(0, x0 - 1)
+        xp = min(img_w - 1, x0 + 1)
+        vm = float(grayscale[row, xm])
+        v0 = float(grayscale[row, x0])
+        vp = float(grayscale[row, xp])
+        d = vm - 2.0 * v0 + vp
+        off = 0.5 * (vm - vp) / d if abs(d) > 1e-6 else 0.0
+        return float(x0) + max(-0.5, min(0.5, off)) + 0.5
+
     def _find_line_peak_h(self, xs, iy, max_scan, grayscale, img_h, img_w,
                           consec_window, dist_tol, lum_thresh):
         """Find horizontal line peak by scanning both vertical directions.
 
-        For each sample x, scans up and down from iy to find the darkest
-        pixel with luminance <= lum_thresh (absolute threshold).
-        Uses parabolic interpolation for sub-pixel valley.
-        Returns median peak y-position or None.
+        Scans ALL dark regions (not just the first) to collect every candidate
+        valley per sample.  Consensus uses inner points with 80% hit rate
+        and picks the line with the lowest mean valley luminance.
         """
         n = len(xs)
-        w = min(consec_window, n)
-        hits: list[tuple[bool, float]] = []
 
+        # Per-sample: collect ALL dark valleys (sub-pixel y, luminance)
+        per_sample: list[list[tuple[float, float]]] = []
         for idx in range(n):
             col = int(round(xs[idx]))
             if col < 0 or col >= img_w:
-                hits.append((False, -1.0))
+                per_sample.append([])
                 continue
-            # Check center pixel
-            center_lum = float(grayscale[iy, col])
-            candidates = []
-            if center_lum <= lum_thresh:
-                candidates.append((center_lum, iy, 0))
-            # Scan both directions independently
+            valleys: list[tuple[float, float]] = []
+            # Center pixel
+            clum = float(grayscale[iy, col])
+            if clum <= lum_thresh:
+                valleys.append((self._subpix_y(iy, col, grayscale, img_h), clum))
+            # Scan both directions — find ALL dark regions
             for scan_dir in (+1, -1):
-                dir_best_lum = 256.0
-                dir_best_y = -1
-                entered_dark = False
+                in_dark = False
+                best_lum = 256.0
+                best_y = -1
                 for d in range(1, max_scan + 1):
                     sy = iy + scan_dir * d
                     if sy < 0 or sy >= img_h:
+                        if in_dark and best_y >= 0:
+                            valleys.append((
+                                self._subpix_y(best_y, col, grayscale, img_h),
+                                best_lum,
+                            ))
                         break
                     lum = float(grayscale[sy, col])
                     if lum <= lum_thresh:
-                        entered_dark = True
-                        if lum < dir_best_lum:
-                            dir_best_lum = lum
-                            dir_best_y = sy
-                    # Stop after passing through dark region
-                    if entered_dark and lum > lum_thresh:
-                        break
-                if dir_best_y >= 0:
-                    candidates.append((dir_best_lum, dir_best_y, abs(dir_best_y - iy)))
-
-            if candidates:
-                # Pick nearest to cursor; tie-break by darkest
-                candidates.sort(key=lambda c: (c[2], c[0]))
-                best_y = candidates[0][1]
-                # Parabolic sub-pixel interpolation around the valley
-                y0 = best_y
-                ym1 = max(0, y0 - 1)
-                yp1 = min(img_h - 1, y0 + 1)
-                v_m1 = float(grayscale[ym1, col])
-                v_0 = float(grayscale[y0, col])
-                v_p1 = float(grayscale[yp1, col])
-                denom = v_m1 - 2.0 * v_0 + v_p1
-                if abs(denom) > 1e-6:
-                    offset = 0.5 * (v_m1 - v_p1) / denom
-                    offset = max(-0.5, min(0.5, offset))
-                else:
-                    offset = 0.0
-                refined = float(y0) + offset + 0.5  # +0.5 for pixel center
-                hits.append((True, refined))
-            else:
-                hits.append((False, -1.0))
-
-        # Stage 1: consensus — collect all candidates, score by mean luminance
-        min_hits = max(w - 1, (w + 1) // 2)
-        all_candidates = []  # (peak_position, mean_luminance)
-        seen_peaks = set()
-        for tol in (dist_tol * 0.5, dist_tol):
-            for start in range(max(n - w + 1, 1)):
-                end = min(start + w, n)
-                window = [hits[i][1] for i in range(start, end) if hits[i][0]]
-                if len(window) < min_hits:
-                    continue
-                median = float(np.median(window))
-                agree = [v for v in window if abs(v - median) <= tol]
-                if len(agree) >= min_hits:
-                    peak = float(np.median(agree))
-                    key = round(peak * 2)  # deduplicate within 0.5px
-                    if key in seen_peaks:
-                        continue
-                    seen_peaks.add(key)
-                    # Score: mean luminance of sample points at this line
-                    iy_s = int(round(peak))
-                    if 0 <= iy_s < img_h:
-                        lums = [
-                            float(grayscale[iy_s, int(round(xs[k]))])
-                            for k in range(n)
-                            if 0 <= int(round(xs[k])) < img_w
-                        ]
-                        score = sum(lums) / len(lums) if lums else 255.0
+                        in_dark = True
+                        if lum < best_lum:
+                            best_lum = lum
+                            best_y = sy
                     else:
-                        score = 255.0
+                        if in_dark:
+                            valleys.append((
+                                self._subpix_y(best_y, col, grayscale, img_h),
+                                best_lum,
+                            ))
+                            in_dark = False
+                            best_lum = 256.0
+                            best_y = -1
+            per_sample.append(valleys)
+
+        # Collect all unique valley positions as candidate targets
+        all_positions: set[int] = set()
+        for valleys in per_sample:
+            for pos, _lum in valleys:
+                all_positions.add(round(pos * 2))  # key in 0.5px units
+        if not all_positions:
+            return None
+
+        # Consensus: inner points (skip first & last), 80% hit rate
+        inner_start = min(1, n - 1)
+        inner_end = max(n - 1, 1)
+        n_inner = inner_end - inner_start
+        min_hits = max((n_inner * 4 + 4) // 5, 1)  # ceil(n_inner * 0.8)
+
+        all_candidates: list[tuple[float, float]] = []
+        seen: set[int] = set()
+        sorted_targets = sorted(all_positions)
+
+        for tol in (dist_tol * 0.5, dist_tol):
+            for tkey in sorted_targets:
+                target = tkey / 2.0
+                agree_pos: list[float] = []
+                agree_lum: list[float] = []
+                for i in range(inner_start, inner_end):
+                    for pos, lum in per_sample[i]:
+                        if abs(pos - target) <= tol:
+                            agree_pos.append(pos)
+                            agree_lum.append(lum)
+                            break
+                if len(agree_pos) >= min_hits:
+                    peak = float(np.median(agree_pos))
+                    key = round(peak * 2)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    score = sum(agree_lum) / len(agree_lum)
                     all_candidates.append((peak, score))
+
         if not all_candidates:
             return None
-        # Pick the line with the lowest mean luminance (darkest = best)
         all_candidates.sort(key=lambda c: c[1])
         initial_peak = all_candidates[0][0]
 
-        # Stage 2: refine — search ±3px around initial peak for deeper valley
+        # Stage 2: refine ±3px around initial peak for deeper valley
         refine_r = 3
         iy2 = int(round(initial_peak))
-        refined_hits: list[tuple[bool, float]] = []
+        refined_per_sample: list[list[tuple[float, float]]] = []
         for idx in range(n):
             col = int(round(xs[idx]))
             if col < 0 or col >= img_w:
-                refined_hits.append((False, -1.0))
+                refined_per_sample.append([])
                 continue
             best_lum = 256.0
             best_y = -1
@@ -1755,164 +1773,147 @@ class Canvas(QtWidgets.QWidget):
                     best_lum = lum
                     best_y = sy
             if best_y >= 0:
-                y0 = best_y
-                ym1 = max(0, y0 - 1)
-                yp1 = min(img_h - 1, y0 + 1)
-                v_m1 = float(grayscale[ym1, col])
-                v_0 = float(grayscale[y0, col])
-                v_p1 = float(grayscale[yp1, col])
-                denom = v_m1 - 2.0 * v_0 + v_p1
-                if abs(denom) > 1e-6:
-                    offset = 0.5 * (v_m1 - v_p1) / denom
-                    offset = max(-0.5, min(0.5, offset))
-                else:
-                    offset = 0.0
-                refined_hits.append((True, float(y0) + offset + 0.5))
+                refined_per_sample.append([
+                    (self._subpix_y(best_y, col, grayscale, img_h), best_lum)
+                ])
             else:
-                refined_hits.append((False, -1.0))
+                refined_per_sample.append([])
 
-        # Consensus on refined hits — also score by mean luminance
-        refined_candidates = []
-        seen_refined = set()
+        # Refined consensus (inner points, 80% hit rate)
+        ref_positions: set[int] = set()
+        for valleys in refined_per_sample:
+            for pos, _lum in valleys:
+                ref_positions.add(round(pos * 2))
+        refined_candidates: list[tuple[float, float]] = []
+        seen_ref: set[int] = set()
         for tol in (dist_tol * 0.5, dist_tol):
-            for start in range(max(n - w + 1, 1)):
-                end = min(start + w, n)
-                window = [refined_hits[i][1] for i in range(start, end) if refined_hits[i][0]]
-                if len(window) < min_hits:
-                    continue
-                median = float(np.median(window))
-                agree = [v for v in window if abs(v - median) <= tol]
-                if len(agree) >= min_hits:
-                    peak = float(np.median(agree))
+            for tkey in sorted(ref_positions):
+                target = tkey / 2.0
+                agree_pos2: list[float] = []
+                agree_lum2: list[float] = []
+                for i in range(inner_start, inner_end):
+                    for pos, lum in refined_per_sample[i]:
+                        if abs(pos - target) <= tol:
+                            agree_pos2.append(pos)
+                            agree_lum2.append(lum)
+                            break
+                if len(agree_pos2) >= min_hits:
+                    peak = float(np.median(agree_pos2))
                     key = round(peak * 2)
-                    if key in seen_refined:
+                    if key in seen_ref:
                         continue
-                    seen_refined.add(key)
-                    iy_s = int(round(peak))
-                    if 0 <= iy_s < img_h:
-                        lums = [
-                            float(grayscale[iy_s, int(round(xs[k]))])
-                            for k in range(n)
-                            if 0 <= int(round(xs[k])) < img_w
-                        ]
-                        score = sum(lums) / len(lums) if lums else 255.0
-                    else:
-                        score = 255.0
+                    seen_ref.add(key)
+                    score = sum(agree_lum2) / len(agree_lum2)
                     refined_candidates.append((peak, score))
         if refined_candidates:
             refined_candidates.sort(key=lambda c: c[1])
             return refined_candidates[0][0]
-        # Fallback to stage 1 result
         return initial_peak
 
     def _find_line_peak_v(self, ys, ix, max_scan, grayscale, img_h, img_w,
                           consec_window, dist_tol, lum_thresh):
         """Find vertical line peak by scanning both horizontal directions.
 
-        Same logic as _find_line_peak_h but scanning left/right.
-        Uses absolute luminance threshold.
-        Returns median peak x-position or None.
+        Scans ALL dark regions (not just the first) to collect every candidate
+        valley per sample.  Consensus uses inner points with 80% hit rate
+        and picks the line with the lowest mean valley luminance.
         """
         n = len(ys)
-        w = min(consec_window, n)
-        hits: list[tuple[bool, float]] = []
 
+        # Per-sample: collect ALL dark valleys (sub-pixel x, luminance)
+        per_sample: list[list[tuple[float, float]]] = []
         for idx in range(n):
             row = int(round(ys[idx]))
             if row < 0 or row >= img_h:
-                hits.append((False, -1.0))
+                per_sample.append([])
                 continue
-            # Check center pixel
-            center_lum = float(grayscale[row, ix])
-            candidates = []
-            if center_lum <= lum_thresh:
-                candidates.append((center_lum, ix, 0))
-            # Scan both directions independently
+            valleys: list[tuple[float, float]] = []
+            # Center pixel
+            clum = float(grayscale[row, ix])
+            if clum <= lum_thresh:
+                valleys.append((self._subpix_x(ix, row, grayscale, img_w), clum))
+            # Scan both directions — find ALL dark regions
             for scan_dir in (+1, -1):
-                dir_best_lum = 256.0
-                dir_best_x = -1
-                entered_dark = False
+                in_dark = False
+                best_lum = 256.0
+                best_x = -1
                 for d in range(1, max_scan + 1):
                     sx = ix + scan_dir * d
                     if sx < 0 or sx >= img_w:
+                        if in_dark and best_x >= 0:
+                            valleys.append((
+                                self._subpix_x(best_x, row, grayscale, img_w),
+                                best_lum,
+                            ))
                         break
                     lum = float(grayscale[row, sx])
                     if lum <= lum_thresh:
-                        entered_dark = True
-                        if lum < dir_best_lum:
-                            dir_best_lum = lum
-                            dir_best_x = sx
-                    # Stop after passing through dark region
-                    if entered_dark and lum > lum_thresh:
-                        break
-                if dir_best_x >= 0:
-                    candidates.append((dir_best_lum, dir_best_x, abs(dir_best_x - ix)))
-
-            if candidates:
-                # Pick nearest to cursor; tie-break by darkest
-                candidates.sort(key=lambda c: (c[2], c[0]))
-                best_x = candidates[0][1]
-                x0 = best_x
-                xm1 = max(0, x0 - 1)
-                xp1 = min(img_w - 1, x0 + 1)
-                v_m1 = float(grayscale[row, xm1])
-                v_0 = float(grayscale[row, x0])
-                v_p1 = float(grayscale[row, xp1])
-                denom = v_m1 - 2.0 * v_0 + v_p1
-                if abs(denom) > 1e-6:
-                    offset = 0.5 * (v_m1 - v_p1) / denom
-                    offset = max(-0.5, min(0.5, offset))
-                else:
-                    offset = 0.0
-                refined = float(x0) + offset + 0.5
-                hits.append((True, refined))
-            else:
-                hits.append((False, -1.0))
-
-        # Stage 1: consensus — collect all candidates, score by mean luminance
-        min_hits = max(w - 1, (w + 1) // 2)
-        all_candidates = []  # (peak_position, mean_luminance)
-        seen_peaks = set()
-        for tol in (dist_tol * 0.5, dist_tol):
-            for start in range(max(n - w + 1, 1)):
-                end = min(start + w, n)
-                window = [hits[i][1] for i in range(start, end) if hits[i][0]]
-                if len(window) < min_hits:
-                    continue
-                median = float(np.median(window))
-                agree = [v for v in window if abs(v - median) <= tol]
-                if len(agree) >= min_hits:
-                    peak = float(np.median(agree))
-                    key = round(peak * 2)  # deduplicate within 0.5px
-                    if key in seen_peaks:
-                        continue
-                    seen_peaks.add(key)
-                    # Score: mean luminance of sample points at this line
-                    ix_s = int(round(peak))
-                    if 0 <= ix_s < img_w:
-                        lums = [
-                            float(grayscale[int(round(ys[k])), ix_s])
-                            for k in range(n)
-                            if 0 <= int(round(ys[k])) < img_h
-                        ]
-                        score = sum(lums) / len(lums) if lums else 255.0
+                        in_dark = True
+                        if lum < best_lum:
+                            best_lum = lum
+                            best_x = sx
                     else:
-                        score = 255.0
+                        if in_dark:
+                            valleys.append((
+                                self._subpix_x(best_x, row, grayscale, img_w),
+                                best_lum,
+                            ))
+                            in_dark = False
+                            best_lum = 256.0
+                            best_x = -1
+            per_sample.append(valleys)
+
+        # Collect all unique valley positions as candidate targets
+        all_positions: set[int] = set()
+        for valleys in per_sample:
+            for pos, _lum in valleys:
+                all_positions.add(round(pos * 2))  # key in 0.5px units
+        if not all_positions:
+            return None
+
+        # Consensus: inner points (skip first & last), 80% hit rate
+        inner_start = min(1, n - 1)
+        inner_end = max(n - 1, 1)
+        n_inner = inner_end - inner_start
+        min_hits = max((n_inner * 4 + 4) // 5, 1)  # ceil(n_inner * 0.8)
+
+        all_candidates: list[tuple[float, float]] = []
+        seen: set[int] = set()
+        sorted_targets = sorted(all_positions)
+
+        for tol in (dist_tol * 0.5, dist_tol):
+            for tkey in sorted_targets:
+                target = tkey / 2.0
+                agree_pos: list[float] = []
+                agree_lum: list[float] = []
+                for i in range(inner_start, inner_end):
+                    for pos, lum in per_sample[i]:
+                        if abs(pos - target) <= tol:
+                            agree_pos.append(pos)
+                            agree_lum.append(lum)
+                            break
+                if len(agree_pos) >= min_hits:
+                    peak = float(np.median(agree_pos))
+                    key = round(peak * 2)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    score = sum(agree_lum) / len(agree_lum)
                     all_candidates.append((peak, score))
+
         if not all_candidates:
             return None
-        # Pick the line with the lowest mean luminance (darkest = best)
         all_candidates.sort(key=lambda c: c[1])
         initial_peak = all_candidates[0][0]
 
-        # Stage 2: refine — search ±3px around initial peak for deeper valley
+        # Stage 2: refine ±3px around initial peak for deeper valley
         refine_r = 3
         ix2 = int(round(initial_peak))
-        refined_hits: list[tuple[bool, float]] = []
+        refined_per_sample: list[list[tuple[float, float]]] = []
         for idx in range(n):
             row = int(round(ys[idx]))
             if row < 0 or row >= img_h:
-                refined_hits.append((False, -1.0))
+                refined_per_sample.append([])
                 continue
             best_lum = 256.0
             best_x = -1
@@ -1922,56 +1923,42 @@ class Canvas(QtWidgets.QWidget):
                     best_lum = lum
                     best_x = sx
             if best_x >= 0:
-                x0 = best_x
-                xm1 = max(0, x0 - 1)
-                xp1 = min(img_w - 1, x0 + 1)
-                v_m1 = float(grayscale[row, xm1])
-                v_0 = float(grayscale[row, x0])
-                v_p1 = float(grayscale[row, xp1])
-                denom = v_m1 - 2.0 * v_0 + v_p1
-                if abs(denom) > 1e-6:
-                    offset = 0.5 * (v_m1 - v_p1) / denom
-                    offset = max(-0.5, min(0.5, offset))
-                else:
-                    offset = 0.0
-                refined_hits.append((True, float(x0) + offset + 0.5))
+                refined_per_sample.append([
+                    (self._subpix_x(best_x, row, grayscale, img_w), best_lum)
+                ])
             else:
-                refined_hits.append((False, -1.0))
+                refined_per_sample.append([])
 
-        # Consensus on refined hits — also score by mean luminance
-        refined_candidates = []
-        seen_refined = set()
+        # Refined consensus (inner points, 80% hit rate)
+        ref_positions: set[int] = set()
+        for valleys in refined_per_sample:
+            for pos, _lum in valleys:
+                ref_positions.add(round(pos * 2))
+        refined_candidates: list[tuple[float, float]] = []
+        seen_ref: set[int] = set()
         for tol in (dist_tol * 0.5, dist_tol):
-            for start in range(max(n - w + 1, 1)):
-                end = min(start + w, n)
-                window = [refined_hits[i][1] for i in range(start, end) if refined_hits[i][0]]
-                if len(window) < min_hits:
-                    continue
-                median = float(np.median(window))
-                agree = [v for v in window if abs(v - median) <= tol]
-                if len(agree) >= min_hits:
-                    peak = float(np.median(agree))
+            for tkey in sorted(ref_positions):
+                target = tkey / 2.0
+                agree_pos2: list[float] = []
+                agree_lum2: list[float] = []
+                for i in range(inner_start, inner_end):
+                    for pos, lum in refined_per_sample[i]:
+                        if abs(pos - target) <= tol:
+                            agree_pos2.append(pos)
+                            agree_lum2.append(lum)
+                            break
+                if len(agree_pos2) >= min_hits:
+                    peak = float(np.median(agree_pos2))
                     key = round(peak * 2)
-                    if key in seen_refined:
+                    if key in seen_ref:
                         continue
-                    seen_refined.add(key)
-                    ix_s = int(round(peak))
-                    if 0 <= ix_s < img_w:
-                        lums = [
-                            float(grayscale[int(round(ys[k])), ix_s])
-                            for k in range(n)
-                            if 0 <= int(round(ys[k])) < img_h
-                        ]
-                        score = sum(lums) / len(lums) if lums else 255.0
-                    else:
-                        score = 255.0
+                    seen_ref.add(key)
+                    score = sum(agree_lum2) / len(agree_lum2)
                     refined_candidates.append((peak, score))
         if refined_candidates:
             refined_candidates.sort(key=lambda c: c[1])
             return refined_candidates[0][0]
-        # Fallback to stage 1 result
         return initial_peak
-        return None
 
     # -- Parallel line magnet detection defaults --
     _PL_DEFAULTS = {
