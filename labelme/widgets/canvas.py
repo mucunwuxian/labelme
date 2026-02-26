@@ -156,6 +156,7 @@ class Canvas(QtWidgets.QWidget):
         self._auto_fit_guides: list[tuple[int, float]] = []
         self._auto_fit_dots: list[tuple[float, float]] = []
         self._auto_fit_count: int = 0
+        self._auto_fit_edge_cache: dict[int, float] = {}  # edge→snap coord
         self._lf_snap_cache: tuple | None = None
         self._lf_snap_entered = False
         self._dark_pixel_magnet_enabled = False
@@ -1439,7 +1440,7 @@ class Canvas(QtWidgets.QWidget):
     # Auto-fit range multiplier (applied to snap_range_pixels)
     _AUTO_FIT_RANGE_MULT = 2
 
-    def _autoFitDetect(self, shape):
+    def _autoFitDetect(self, shape, range_mult=None):
         """Detect auto-fit snap positions for all edges (preview only, no shape change).
 
         Returns list of (edge_index, snap_pos) and sets visual feedback variables.
@@ -1453,7 +1454,7 @@ class Canvas(QtWidgets.QWidget):
         if self._grayscale_cache is None:
             return []
 
-        mult = self._AUTO_FIT_RANGE_MULT
+        mult = range_mult if range_mult is not None else self._AUTO_FIT_RANGE_MULT
         pending = []  # [(edge_index, snap_pos), ...]
 
         for edge_index in (
@@ -1525,10 +1526,91 @@ class Canvas(QtWidgets.QWidget):
         return pending
 
     def _autoFitApply(self, shape):
-        """Detect and apply auto-fit snaps to a shape."""
+        """Detect and apply auto-fit snaps to a shape (two-pass + hysteresis)."""
+        from labelme.shape import Shape
+
+        all_guides: list[tuple[int, float]] = []
+        all_dots: list[tuple[float, float]] = []
+
+        # --- Pass 1: 2x range ---
         pending = self._autoFitDetect(shape)
+        all_guides.extend(self._auto_fit_guides)
+        all_dots.extend(self._auto_fit_dots)
         for edge_index, snap_pos in pending:
             shape.moveEdgeTo(edge_index, snap_pos)
+
+        # --- Pass 2: 1x range, retry missed edges with updated bounds ---
+        if pending and len(pending) < 4:
+            fitted = {ei for ei, _ in pending}
+            pending2 = self._autoFitDetect(shape, range_mult=1)
+            for edge_index, snap_pos in pending2:
+                if edge_index not in fitted:
+                    shape.moveEdgeTo(edge_index, snap_pos)
+                    pending.append((edge_index, snap_pos))
+            # Collect only NEW guides/dots from pass 2
+            for g in self._auto_fit_guides:
+                if g[0] not in fitted:
+                    all_guides.append(g)
+            for d in self._auto_fit_dots:
+                all_dots.append(d)
+
+        # --- Hysteresis: reuse cached snap for edges still missed ---
+        fitted = {ei for ei, _ in pending}
+        if len(fitted) < 4 and self._auto_fit_edge_cache:
+            grayscale = self._grayscale_cache
+            if grayscale is not None:
+                img_h, img_w = grayscale.shape
+                mult = self._AUTO_FIT_RANGE_MULT
+                cfg_snap = 5
+                cfg_base = 2560
+                for rule in self._line_fit_magnet_config:
+                    cfg_snap = rule.get("snap_range_pixels", cfg_snap)
+                    cfg_base = rule.get("resize_base", cfg_base)
+                    break
+                scale = max(img_w, img_h) / cfg_base
+                hyst_window = cfg_snap * mult * scale
+
+                p0, p1 = shape.points[0], shape.points[1]
+                for edge_idx, cached_val in list(
+                    self._auto_fit_edge_cache.items()
+                ):
+                    if edge_idx in fitted:
+                        continue
+                    if edge_idx == Shape.EDGE_TOP:
+                        cur = min(p0.y(), p1.y())
+                    elif edge_idx == Shape.EDGE_BOTTOM:
+                        cur = max(p0.y(), p1.y())
+                    elif edge_idx == Shape.EDGE_LEFT:
+                        cur = min(p0.x(), p1.x())
+                    elif edge_idx == Shape.EDGE_RIGHT:
+                        cur = max(p0.x(), p1.x())
+                    else:
+                        continue
+                    if abs(cur - cached_val) <= hyst_window:
+                        if edge_idx in (
+                            Shape.EDGE_TOP, Shape.EDGE_BOTTOM,
+                        ):
+                            sp = QPointF(0, cached_val)
+                        else:
+                            sp = QPointF(cached_val, 0)
+                        shape.moveEdgeTo(edge_idx, sp)
+                        pending.append((edge_idx, sp))
+                        fitted.add(edge_idx)
+                        # Add guide line for hysteresis edge
+                        all_guides.append((edge_idx, cached_val))
+
+        # --- Update state ---
+        self._auto_fit_guides = all_guides
+        self._auto_fit_dots = all_dots
+        self._auto_fit_count = len(pending)
+
+        self._auto_fit_edge_cache.clear()
+        for edge_index, snap_pos in pending:
+            if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                self._auto_fit_edge_cache[edge_index] = snap_pos.y()
+            else:
+                self._auto_fit_edge_cache[edge_index] = snap_pos.x()
+
         return len(pending) > 0
 
     def _autoFitClearGuides(self):
@@ -1536,6 +1618,7 @@ class Canvas(QtWidgets.QWidget):
         self._auto_fit_guides = []
         self._auto_fit_dots = []
         self._auto_fit_count = 0
+        self._auto_fit_edge_cache.clear()
 
     # -- Line fit magnet defaults --
     _LF_DEFAULTS = {
@@ -1665,7 +1748,7 @@ class Canvas(QtWidgets.QWidget):
         """Find horizontal line peak by scanning both vertical directions.
 
         Scans ALL dark regions (not just the first) to collect every candidate
-        valley per sample.  Consensus uses inner points with 80% hit rate
+        valley per sample.  Consensus uses inner points with 60% hit rate
         and picks the line with the lowest mean valley luminance.
         """
         n = len(xs)
@@ -1721,11 +1804,11 @@ class Canvas(QtWidgets.QWidget):
         if not all_positions:
             return None
 
-        # Consensus: inner points (skip first & last), 80% hit rate
+        # Consensus: inner points (skip first & last), 60% hit rate
         inner_start = min(1, n - 1)
         inner_end = max(n - 1, 1)
         n_inner = inner_end - inner_start
-        min_hits = max((n_inner * 4 + 4) // 5, 1)  # ceil(n_inner * 0.8)
+        min_hits = max((n_inner * 6 + 9) // 10, 1)  # ceil(n_inner * 0.6)
 
         all_candidates: list[tuple[float, float]] = []
         seen: set[int] = set()
@@ -1779,7 +1862,7 @@ class Canvas(QtWidgets.QWidget):
             else:
                 refined_per_sample.append([])
 
-        # Refined consensus (inner points, 80% hit rate)
+        # Refined consensus (inner points, 60% hit rate)
         ref_positions: set[int] = set()
         for valleys in refined_per_sample:
             for pos, _lum in valleys:
@@ -1815,7 +1898,7 @@ class Canvas(QtWidgets.QWidget):
         """Find vertical line peak by scanning both horizontal directions.
 
         Scans ALL dark regions (not just the first) to collect every candidate
-        valley per sample.  Consensus uses inner points with 80% hit rate
+        valley per sample.  Consensus uses inner points with 60% hit rate
         and picks the line with the lowest mean valley luminance.
         """
         n = len(ys)
@@ -1871,11 +1954,11 @@ class Canvas(QtWidgets.QWidget):
         if not all_positions:
             return None
 
-        # Consensus: inner points (skip first & last), 80% hit rate
+        # Consensus: inner points (skip first & last), 60% hit rate
         inner_start = min(1, n - 1)
         inner_end = max(n - 1, 1)
         n_inner = inner_end - inner_start
-        min_hits = max((n_inner * 4 + 4) // 5, 1)  # ceil(n_inner * 0.8)
+        min_hits = max((n_inner * 6 + 9) // 10, 1)  # ceil(n_inner * 0.6)
 
         all_candidates: list[tuple[float, float]] = []
         seen: set[int] = set()
@@ -1929,7 +2012,7 @@ class Canvas(QtWidgets.QWidget):
             else:
                 refined_per_sample.append([])
 
-        # Refined consensus (inner points, 80% hit rate)
+        # Refined consensus (inner points, 60% hit rate)
         ref_positions: set[int] = set()
         for valleys in refined_per_sample:
             for pos, _lum in valleys:
