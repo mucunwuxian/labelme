@@ -754,12 +754,11 @@ class Canvas(QtWidgets.QWidget):
                 if (
                     self._auto_fit_enabled
                     and self.hShape
-                    and not (
-                        QtWidgets.QApplication.keyboardModifiers()
-                        & Qt.ShiftModifier
-                    )
+                    and not is_shift_pressed
                 ):
                     self._autoFitApply(self.hShape)
+                else:
+                    self._autoFitClearGuides()
                 self.repaint()
                 self.movingShape = True
             return
@@ -1140,10 +1139,7 @@ class Canvas(QtWidgets.QWidget):
             if (
                 self._auto_fit_enabled
                 and not self._edge_midpoint_dragging
-                and not (
-                    QtWidgets.QApplication.keyboardModifiers()
-                    & Qt.ShiftModifier
-                )
+                and not (a0.modifiers() & Qt.ShiftModifier)
             ):
                 self._autoFitApply(self.hShape)
             self._autoFitClearGuides()
@@ -1529,6 +1525,9 @@ class Canvas(QtWidgets.QWidget):
         """Detect and apply auto-fit snaps to a shape (two-pass + hysteresis)."""
         from labelme.shape import Shape
 
+        # Clear edge-drag snap cache to prevent interference
+        self._lf_snap_cache = None
+
         all_guides: list[tuple[int, float]] = []
         all_dots: list[tuple[float, float]] = []
 
@@ -1761,15 +1760,22 @@ class Canvas(QtWidgets.QWidget):
                 per_sample.append([])
                 continue
             valleys: list[tuple[float, float]] = []
-            # Center pixel
+            # Check center pixel darkness for scan initialization
             clum = float(grayscale[iy, col])
-            if clum <= lum_thresh:
-                valleys.append((self._subpix_y(iy, col, grayscale, img_h), clum))
+            center_dark = clum <= lum_thresh
             # Scan both directions — find ALL dark regions
+            # If center pixel is dark, initialize scan as already in a dark
+            # region so the center's dark region is handled as one contiguous
+            # region instead of being split into a separate valley.
             for scan_dir in (+1, -1):
-                in_dark = False
-                best_lum = 256.0
-                best_y = -1
+                if center_dark:
+                    in_dark = True
+                    best_lum = clum
+                    best_y = iy
+                else:
+                    in_dark = False
+                    best_lum = 256.0
+                    best_y = -1
                 for d in range(1, max_scan + 1):
                     sy = iy + scan_dir * d
                     if sy < 0 or sy >= img_h:
@@ -1911,15 +1917,22 @@ class Canvas(QtWidgets.QWidget):
                 per_sample.append([])
                 continue
             valleys: list[tuple[float, float]] = []
-            # Center pixel
+            # Check center pixel darkness for scan initialization
             clum = float(grayscale[row, ix])
-            if clum <= lum_thresh:
-                valleys.append((self._subpix_x(ix, row, grayscale, img_w), clum))
+            center_dark = clum <= lum_thresh
             # Scan both directions — find ALL dark regions
+            # If center pixel is dark, initialize scan as already in a dark
+            # region so the center's dark region is handled as one contiguous
+            # region instead of being split into a separate valley.
             for scan_dir in (+1, -1):
-                in_dark = False
-                best_lum = 256.0
-                best_x = -1
+                if center_dark:
+                    in_dark = True
+                    best_lum = clum
+                    best_x = ix
+                else:
+                    in_dark = False
+                    best_lum = 256.0
+                    best_x = -1
                 for d in range(1, max_scan + 1):
                     sx = ix + scan_dir * d
                     if sx < 0 or sx >= img_w:
