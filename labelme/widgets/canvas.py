@@ -1680,9 +1680,10 @@ class Canvas(QtWidgets.QWidget):
             else:
                 hits.append((False, -1.0))
 
-        # Stage 1: consensus to find approximate line position
+        # Stage 1: consensus — collect all candidates, score by mean luminance
         min_hits = max(w - 1, (w + 1) // 2)
-        initial_peak = None
+        all_candidates = []  # (peak_position, mean_luminance)
+        seen_peaks = set()
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1692,12 +1693,28 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
-                    initial_peak = float(np.median(agree))
-                    break
-            if initial_peak is not None:
-                break
-        if initial_peak is None:
+                    peak = float(np.median(agree))
+                    key = round(peak * 2)  # deduplicate within 0.5px
+                    if key in seen_peaks:
+                        continue
+                    seen_peaks.add(key)
+                    # Score: mean luminance of sample points at this line
+                    iy_s = int(round(peak))
+                    if 0 <= iy_s < img_h:
+                        lums = [
+                            float(grayscale[iy_s, int(round(xs[k]))])
+                            for k in range(n)
+                            if 0 <= int(round(xs[k])) < img_w
+                        ]
+                        score = sum(lums) / len(lums) if lums else 255.0
+                    else:
+                        score = 255.0
+                    all_candidates.append((peak, score))
+        if not all_candidates:
             return None
+        # Pick the line with the lowest mean luminance (darkest = best)
+        all_candidates.sort(key=lambda c: c[1])
+        initial_peak = all_candidates[0][0]
 
         # Stage 2: refine — search ±3px around initial peak for deeper valley
         refine_r = 3
@@ -1732,7 +1749,9 @@ class Canvas(QtWidgets.QWidget):
             else:
                 refined_hits.append((False, -1.0))
 
-        # Consensus on refined hits
+        # Consensus on refined hits — also score by mean luminance
+        refined_candidates = []
+        seen_refined = set()
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1742,7 +1761,25 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
-                    return float(np.median(agree))
+                    peak = float(np.median(agree))
+                    key = round(peak * 2)
+                    if key in seen_refined:
+                        continue
+                    seen_refined.add(key)
+                    iy_s = int(round(peak))
+                    if 0 <= iy_s < img_h:
+                        lums = [
+                            float(grayscale[iy_s, int(round(xs[k]))])
+                            for k in range(n)
+                            if 0 <= int(round(xs[k])) < img_w
+                        ]
+                        score = sum(lums) / len(lums) if lums else 255.0
+                    else:
+                        score = 255.0
+                    refined_candidates.append((peak, score))
+        if refined_candidates:
+            refined_candidates.sort(key=lambda c: c[1])
+            return refined_candidates[0][0]
         # Fallback to stage 1 result
         return initial_peak
 
@@ -1810,9 +1847,10 @@ class Canvas(QtWidgets.QWidget):
             else:
                 hits.append((False, -1.0))
 
-        # Stage 1: consensus to find approximate line position
+        # Stage 1: consensus — collect all candidates, score by mean luminance
         min_hits = max(w - 1, (w + 1) // 2)
-        initial_peak = None
+        all_candidates = []  # (peak_position, mean_luminance)
+        seen_peaks = set()
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1822,12 +1860,28 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
-                    initial_peak = float(np.median(agree))
-                    break
-            if initial_peak is not None:
-                break
-        if initial_peak is None:
+                    peak = float(np.median(agree))
+                    key = round(peak * 2)  # deduplicate within 0.5px
+                    if key in seen_peaks:
+                        continue
+                    seen_peaks.add(key)
+                    # Score: mean luminance of sample points at this line
+                    ix_s = int(round(peak))
+                    if 0 <= ix_s < img_w:
+                        lums = [
+                            float(grayscale[int(round(ys[k])), ix_s])
+                            for k in range(n)
+                            if 0 <= int(round(ys[k])) < img_h
+                        ]
+                        score = sum(lums) / len(lums) if lums else 255.0
+                    else:
+                        score = 255.0
+                    all_candidates.append((peak, score))
+        if not all_candidates:
             return None
+        # Pick the line with the lowest mean luminance (darkest = best)
+        all_candidates.sort(key=lambda c: c[1])
+        initial_peak = all_candidates[0][0]
 
         # Stage 2: refine — search ±3px around initial peak for deeper valley
         refine_r = 3
@@ -1862,7 +1916,9 @@ class Canvas(QtWidgets.QWidget):
             else:
                 refined_hits.append((False, -1.0))
 
-        # Consensus on refined hits
+        # Consensus on refined hits — also score by mean luminance
+        refined_candidates = []
+        seen_refined = set()
         for tol in (dist_tol * 0.5, dist_tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
@@ -1872,7 +1928,25 @@ class Canvas(QtWidgets.QWidget):
                 median = float(np.median(window))
                 agree = [v for v in window if abs(v - median) <= tol]
                 if len(agree) >= min_hits:
-                    return float(np.median(agree))
+                    peak = float(np.median(agree))
+                    key = round(peak * 2)
+                    if key in seen_refined:
+                        continue
+                    seen_refined.add(key)
+                    ix_s = int(round(peak))
+                    if 0 <= ix_s < img_w:
+                        lums = [
+                            float(grayscale[int(round(ys[k])), ix_s])
+                            for k in range(n)
+                            if 0 <= int(round(ys[k])) < img_h
+                        ]
+                        score = sum(lums) / len(lums) if lums else 255.0
+                    else:
+                        score = 255.0
+                    refined_candidates.append((peak, score))
+        if refined_candidates:
+            refined_candidates.sort(key=lambda c: c[1])
+            return refined_candidates[0][0]
         # Fallback to stage 1 result
         return initial_peak
         return None
