@@ -750,7 +750,7 @@ class Canvas(QtWidgets.QWidget):
                 self.overrideCursor(CURSOR_MOVE)
                 self.boundedMoveShapes(self.selectedShapes, pos)
                 if self._auto_fit_enabled and self.hShape:
-                    self._autoFitDetect(self.hShape)
+                    self._autoFitApply(self.hShape)
                 self.repaint()
                 self.movingShape = True
             return
@@ -1130,6 +1130,7 @@ class Canvas(QtWidgets.QWidget):
             # Auto-fit: whole-shape move only (exclude edge midpoint drag)
             if self._auto_fit_enabled and not self._edge_midpoint_dragging:
                 self._autoFitApply(self.hShape)
+                self._autoFitClearGuides()
                 self.repaint()
 
             index = self.shapes.index(self.hShape)
@@ -1507,10 +1508,12 @@ class Canvas(QtWidgets.QWidget):
         pending = self._autoFitDetect(shape)
         for edge_index, snap_pos in pending:
             shape.moveEdgeTo(edge_index, snap_pos)
-        # Clear preview visuals after applying
+        return len(pending) > 0
+
+    def _autoFitClearGuides(self):
+        """Clear auto-fit visual feedback."""
         self._auto_fit_guides = []
         self._auto_fit_dots = []
-        return len(pending) > 0
 
     # -- Line fit magnet defaults --
     _LF_DEFAULTS = {
