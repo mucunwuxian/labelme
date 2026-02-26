@@ -1171,8 +1171,9 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             toggle_keep_prev_mode,
             None,
-            copyFromPrevJson,
             autoFit,
+            None,
+            copyFromPrevJson,
         )
 
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)

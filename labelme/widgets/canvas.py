@@ -156,7 +156,8 @@ class Canvas(QtWidgets.QWidget):
         self._auto_fit_guides: list[tuple[int, float]] = []
         self._auto_fit_dots: list[tuple[float, float]] = []
         self._auto_fit_count: int = 0
-        self._auto_fit_edge_cache: dict[int, float] = {}  # edge→snap coord
+        self._auto_fit_snap_targets: dict[int, float] = {}  # edge→abs coord
+        self._auto_fit_last_detect_pos: QPointF | None = None
         self._lf_snap_cache: tuple | None = None
         self._lf_snap_entered = False
         self._dark_pixel_magnet_enabled = False
@@ -756,8 +757,19 @@ class Canvas(QtWidgets.QWidget):
                     and self.hShape
                     and not is_shift_pressed
                 ):
-                    self._autoFitApply(self.hShape)
+                    # Re-detect when cursor moved ≥0.1px from last detection
+                    lp = self._auto_fit_last_detect_pos
+                    if lp is None or (
+                        (pos.x() - lp.x()) ** 2 + (pos.y() - lp.y()) ** 2
+                        >= 0.01  # 0.1px squared
+                    ):
+                        self._autoFitDetectAndStore(self.hShape, merge=True)
+                        self._auto_fit_last_detect_pos = QPointF(pos)
+                    # Always re-apply cached snap targets
+                    self._reapplyAutoFitSnaps(self.hShape)
                 else:
+                    self._auto_fit_snap_targets.clear()
+                    self._auto_fit_last_detect_pos = None
                     self._autoFitClearGuides()
                 self.repaint()
                 self.movingShape = True
@@ -1135,13 +1147,8 @@ class Canvas(QtWidgets.QWidget):
             self.restoreCursor()
 
         if self.movingShape and self.hShape:
-            # Auto-fit: whole-shape move only (exclude edge midpoint drag / Shift)
-            if (
-                self._auto_fit_enabled
-                and not self._edge_midpoint_dragging
-                and not (a0.modifiers() & Qt.ShiftModifier)
-            ):
-                self._autoFitApply(self.hShape)
+            self._auto_fit_snap_targets.clear()
+            self._auto_fit_last_detect_pos = None
             self._autoFitClearGuides()
             self.repaint()
 
@@ -1433,10 +1440,7 @@ class Canvas(QtWidgets.QWidget):
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
 
-    # Auto-fit range multiplier (applied to snap_range_pixels)
-    _AUTO_FIT_RANGE_MULT = 2
-
-    def _autoFitDetect(self, shape, range_mult=None):
+    def _autoFitDetect(self, shape):
         """Detect auto-fit snap positions for all edges (preview only, no shape change).
 
         Returns list of (edge_index, snap_pos) and sets visual feedback variables.
@@ -1449,8 +1453,6 @@ class Canvas(QtWidgets.QWidget):
             return []
         if self._grayscale_cache is None:
             return []
-
-        mult = range_mult if range_mult is not None else self._AUTO_FIT_RANGE_MULT
         pending = []  # [(edge_index, snap_pos), ...]
 
         for edge_index in (
@@ -1477,17 +1479,13 @@ class Canvas(QtWidgets.QWidget):
 
             snap_found = False
 
-            # 1. Line fit snap (3x range)
+            # 1. Line fit snap
             if self._line_fit_enabled and not snap_found:
                 for rule in self._line_fit_magnet_config:
                     if shape.label != rule.get("target_label"):
                         continue
-                    widened = dict(rule)
-                    widened["snap_range_pixels"] = (
-                        rule.get("snap_range_pixels", 5) * mult
-                    )
                     result = self._detect_line_fit_snap(
-                        widened, shape, edge_index, pos
+                        rule, shape, edge_index, pos
                     )
                     if result is not None:
                         pending.append((edge_index, result[0]))
@@ -1497,19 +1495,15 @@ class Canvas(QtWidgets.QWidget):
                         snap_found = True
                         break
 
-            # 2. Text bounding snap (3x range)
+            # 2. Text bounding snap
             if self._text_bounding_enabled and not snap_found:
                 for i, rule in enumerate(
                     self._text_bounding_magnet_config
                 ):
                     if shape.label != rule.get("target_label"):
                         continue
-                    widened = dict(rule)
-                    widened["snap_range_pixels"] = (
-                        rule.get("snap_range_pixels", 3) * mult
-                    )
                     result = self._detect_text_bounding_snap(
-                        widened, i, shape, edge_index, pos
+                        rule, i, shape, edge_index, pos
                     )
                     if result is not None:
                         pending.append((edge_index, result[0]))
@@ -1521,103 +1515,50 @@ class Canvas(QtWidgets.QWidget):
         self._auto_fit_count = len(pending)
         return pending
 
-    def _autoFitApply(self, shape):
-        """Detect and apply auto-fit snaps to a shape (two-pass + hysteresis)."""
+    def _autoFitDetectAndStore(self, shape, merge=False):
+        """Detect auto-fit snaps and store targets (does NOT modify shape).
+
+        merge=False: clear all targets, store only newly detected ones.
+        merge=True:  update detected edges, keep existing targets for
+                     edges where detection failed (prevents partial dropout).
+        """
         from labelme.shape import Shape
 
         # Clear edge-drag snap cache to prevent interference
         self._lf_snap_cache = None
 
-        all_guides: list[tuple[int, float]] = []
-        all_dots: list[tuple[float, float]] = []
-
-        # --- Pass 1: 2x range ---
         pending = self._autoFitDetect(shape)
-        all_guides.extend(self._auto_fit_guides)
-        all_dots.extend(self._auto_fit_dots)
-        for edge_index, snap_pos in pending:
-            shape.moveEdgeTo(edge_index, snap_pos)
-
-        # --- Pass 2: 1x range, retry missed edges with updated bounds ---
-        if pending and len(pending) < 4:
-            fitted = {ei for ei, _ in pending}
-            pending2 = self._autoFitDetect(shape, range_mult=1)
-            for edge_index, snap_pos in pending2:
-                if edge_index not in fitted:
-                    shape.moveEdgeTo(edge_index, snap_pos)
-                    pending.append((edge_index, snap_pos))
-            # Collect only NEW guides/dots from pass 2
-            for g in self._auto_fit_guides:
-                if g[0] not in fitted:
-                    all_guides.append(g)
-            for d in self._auto_fit_dots:
-                all_dots.append(d)
-
-        # --- Hysteresis: reuse cached snap for edges still missed ---
-        fitted = {ei for ei, _ in pending}
-        if len(fitted) < 4 and self._auto_fit_edge_cache:
-            grayscale = self._grayscale_cache
-            if grayscale is not None:
-                img_h, img_w = grayscale.shape
-                mult = self._AUTO_FIT_RANGE_MULT
-                cfg_snap = 5
-                cfg_base = 2560
-                for rule in self._line_fit_magnet_config:
-                    cfg_snap = rule.get("snap_range_pixels", cfg_snap)
-                    cfg_base = rule.get("resize_base", cfg_base)
-                    break
-                scale = max(img_w, img_h) / cfg_base
-                hyst_window = cfg_snap * mult * scale
-
-                p0, p1 = shape.points[0], shape.points[1]
-                for edge_idx, cached_val in list(
-                    self._auto_fit_edge_cache.items()
-                ):
-                    if edge_idx in fitted:
-                        continue
-                    if edge_idx == Shape.EDGE_TOP:
-                        cur = min(p0.y(), p1.y())
-                    elif edge_idx == Shape.EDGE_BOTTOM:
-                        cur = max(p0.y(), p1.y())
-                    elif edge_idx == Shape.EDGE_LEFT:
-                        cur = min(p0.x(), p1.x())
-                    elif edge_idx == Shape.EDGE_RIGHT:
-                        cur = max(p0.x(), p1.x())
-                    else:
-                        continue
-                    if abs(cur - cached_val) <= hyst_window:
-                        if edge_idx in (
-                            Shape.EDGE_TOP, Shape.EDGE_BOTTOM,
-                        ):
-                            sp = QPointF(0, cached_val)
-                        else:
-                            sp = QPointF(cached_val, 0)
-                        shape.moveEdgeTo(edge_idx, sp)
-                        pending.append((edge_idx, sp))
-                        fitted.add(edge_idx)
-                        # Add guide line for hysteresis edge
-                        all_guides.append((edge_idx, cached_val))
-
-        # --- Update state ---
-        self._auto_fit_guides = all_guides
-        self._auto_fit_dots = all_dots
-        self._auto_fit_count = len(pending)
-
-        self._auto_fit_edge_cache.clear()
+        if not merge:
+            self._auto_fit_snap_targets.clear()
         for edge_index, snap_pos in pending:
             if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
-                self._auto_fit_edge_cache[edge_index] = snap_pos.y()
+                self._auto_fit_snap_targets[edge_index] = snap_pos.y()
             else:
-                self._auto_fit_edge_cache[edge_index] = snap_pos.x()
+                self._auto_fit_snap_targets[edge_index] = snap_pos.x()
 
-        return len(pending) > 0
+        # Rebuild guides from all targets (including merged ones)
+        self._auto_fit_guides = [
+            (ei, coord) for ei, coord in self._auto_fit_snap_targets.items()
+        ]
+        self._auto_fit_count = len(self._auto_fit_snap_targets)
+
+    def _reapplyAutoFitSnaps(self, shape):
+        """Re-apply cached snap targets after boundedMoveShapes."""
+        from labelme.shape import Shape
+
+        if not self._auto_fit_snap_targets:
+            return
+        for edge_idx, target in self._auto_fit_snap_targets.items():
+            if edge_idx in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                shape.moveEdgeTo(edge_idx, QPointF(0, target))
+            else:
+                shape.moveEdgeTo(edge_idx, QPointF(target, 0))
 
     def _autoFitClearGuides(self):
         """Clear auto-fit visual feedback."""
         self._auto_fit_guides = []
         self._auto_fit_dots = []
         self._auto_fit_count = 0
-        self._auto_fit_edge_cache.clear()
 
     # -- Line fit magnet defaults --
     _LF_DEFAULTS = {
