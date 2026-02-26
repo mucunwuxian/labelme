@@ -152,6 +152,9 @@ class Canvas(QtWidgets.QWidget):
         self._parallel_line_dist_enabled = False
         self._text_bounding_enabled = False
         self._line_fit_enabled = False
+        self._auto_fit_enabled = False
+        self._auto_fit_guides: list[tuple[int, float]] = []
+        self._auto_fit_dots: list[tuple[float, float]] = []
         self._lf_snap_cache: tuple | None = None
         self._lf_snap_entered = False
         self._dark_pixel_magnet_enabled = False
@@ -314,6 +317,9 @@ class Canvas(QtWidgets.QWidget):
 
     def setLineFitMagnetConfig(self, config: list[dict]):
         self._line_fit_magnet_config = config
+
+    def setAutoFitEnabled(self, enabled: bool):
+        self._auto_fit_enabled = enabled
 
     def setReferenceMedians(self, medians: dict[str, float | None]):
         self._reference_medians = medians
@@ -743,6 +749,8 @@ class Canvas(QtWidgets.QWidget):
             elif self.selectedShapes and self.prevPoint is not None:
                 self.overrideCursor(CURSOR_MOVE)
                 self.boundedMoveShapes(self.selectedShapes, pos)
+                if self._auto_fit_enabled and self.hShape:
+                    self._autoFitDetect(self.hShape)
                 self.repaint()
                 self.movingShape = True
             return
@@ -1119,6 +1127,11 @@ class Canvas(QtWidgets.QWidget):
             self.restoreCursor()
 
         if self.movingShape and self.hShape:
+            # Auto-fit: whole-shape move only (exclude edge midpoint drag)
+            if self._auto_fit_enabled and not self._edge_midpoint_dragging:
+                self._autoFitApply(self.hShape)
+                self.repaint()
+
             index = self.shapes.index(self.hShape)
             if self.shapesBackups[-1][index].points != self.shapes[index].points:
                 self.hShape.touch()  # Update modification timestamp
@@ -1406,6 +1419,98 @@ class Canvas(QtWidgets.QWidget):
         # (else: parallel line snap active or text bounding disabled — skip)
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+
+    def _autoFitDetect(self, shape):
+        """Detect auto-fit snap positions for all edges (preview only, no shape change).
+
+        Returns list of (edge_index, snap_pos) and sets visual feedback variables.
+        """
+        self._auto_fit_guides = []
+        self._auto_fit_dots = []
+
+        if shape.shape_type != "rectangle" or len(shape.points) != 2:
+            return []
+        if self._grayscale_cache is None:
+            return []
+
+        pending = []  # [(edge_index, snap_pos), ...]
+
+        for edge_index in (
+            Shape.EDGE_TOP, Shape.EDGE_BOTTOM,
+            Shape.EDGE_LEFT, Shape.EDGE_RIGHT,
+        ):
+            p0, p1 = shape.points[0], shape.points[1]
+            if edge_index == Shape.EDGE_TOP:
+                pos = QPointF(
+                    (p0.x() + p1.x()) / 2, min(p0.y(), p1.y())
+                )
+            elif edge_index == Shape.EDGE_BOTTOM:
+                pos = QPointF(
+                    (p0.x() + p1.x()) / 2, max(p0.y(), p1.y())
+                )
+            elif edge_index == Shape.EDGE_LEFT:
+                pos = QPointF(
+                    min(p0.x(), p1.x()), (p0.y() + p1.y()) / 2
+                )
+            elif edge_index == Shape.EDGE_RIGHT:
+                pos = QPointF(
+                    max(p0.x(), p1.x()), (p0.y() + p1.y()) / 2
+                )
+
+            snap_found = False
+
+            # 1. Line fit snap (2x range)
+            if self._line_fit_enabled and not snap_found:
+                for rule in self._line_fit_magnet_config:
+                    if shape.label != rule.get("target_label"):
+                        continue
+                    doubled = dict(rule)
+                    doubled["snap_range_pixels"] = (
+                        rule.get("snap_range_pixels", 5) * 2
+                    )
+                    result = self._detect_line_fit_snap(
+                        doubled, shape, edge_index, pos
+                    )
+                    if result is not None:
+                        pending.append((edge_index, result[0]))
+                        self._auto_fit_guides.append(
+                            (edge_index, result[1])
+                        )
+                        snap_found = True
+                        break
+
+            # 2. Text bounding snap (2x range)
+            if self._text_bounding_enabled and not snap_found:
+                for i, rule in enumerate(
+                    self._text_bounding_magnet_config
+                ):
+                    if shape.label != rule.get("target_label"):
+                        continue
+                    doubled = dict(rule)
+                    doubled["snap_range_pixels"] = (
+                        rule.get("snap_range_pixels", 3) * 2
+                    )
+                    result = self._detect_text_bounding_snap(
+                        doubled, i, shape, edge_index, pos
+                    )
+                    if result is not None:
+                        pending.append((edge_index, result[0]))
+                        if result[1]:
+                            self._auto_fit_dots.extend(result[1])
+                        snap_found = True
+                        break
+
+        return pending
+
+    def _autoFitApply(self, shape):
+        """Detect and apply auto-fit snaps to a shape."""
+        pending = self._autoFitDetect(shape)
+        for edge_index, snap_pos in pending:
+            shape.moveEdgeTo(edge_index, snap_pos)
+        # Clear preview visuals after applying
+        self._auto_fit_guides = []
+        self._auto_fit_dots = []
+        return len(pending) > 0
 
     # -- Line fit magnet defaults --
     _LF_DEFAULTS = {
@@ -2700,6 +2805,27 @@ class Canvas(QtWidgets.QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 128)))
             for dx, dy in self._text_bounding_snap_dots:
+                sx = (dx + 0.5) * self.scale
+                sy = (dy + 0.5) * self.scale
+                p.drawEllipse(QPointF(sx, sy), 3.0, 3.0)
+
+        # Draw auto-fit preview guides
+        if self._auto_fit_guides:
+            snap_pen = QtGui.QPen(QtGui.QColor(255, 0, 0, 80))
+            snap_pen.setWidth(4)
+            snap_pen.setStyle(Qt.DashLine)
+            p.setPen(snap_pen)
+            for edge_idx, line_pos in self._auto_fit_guides:
+                if edge_idx in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                    ly = line_pos * self.scale
+                    p.drawLine(QPointF(0, ly), QPointF(self.width(), ly))
+                elif edge_idx in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+                    lx = line_pos * self.scale
+                    p.drawLine(QPointF(lx, 0), QPointF(lx, self.height()))
+        if self._auto_fit_dots:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 128)))
+            for dx, dy in self._auto_fit_dots:
                 sx = (dx + 0.5) * self.scale
                 sy = (dy + 0.5) * self.scale
                 p.drawEllipse(QPointF(sx, sy), 3.0, 3.0)

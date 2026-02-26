@@ -665,6 +665,16 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             enabled=True,
         )
+        autoFit = action(
+            self.tr("フィッティングをオートで行う"),
+            self._auto_fit_toggled,
+            None,
+            None,
+            self.tr("シェイプ移動時にフィッティングを自動適用"),
+            checkable=True,
+            enabled=True,
+        )
+        autoFit.setChecked(False)
         undoLastPoint = action(
             self.tr("Undo last point"),
             self.canvas.undoLastPoint,
@@ -1100,6 +1110,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showDarkPixelMagnet=showDarkPixelMagnet,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
+            autoFit=autoFit,
         )
         self.on_shapes_present_actions = (saveAs, hideAll, showAll, toggleAll)
 
@@ -1151,7 +1162,6 @@ class MainWindow(QtWidgets.QMainWindow):
             duplicate,
             copy,
             paste,
-            copyFromPrevJson,
             delete,
             None,
             undo,
@@ -1160,6 +1170,9 @@ class MainWindow(QtWidgets.QMainWindow):
             removePoint,
             None,
             toggle_keep_prev_mode,
+            None,
+            copyFromPrevJson,
+            autoFit,
         )
 
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)
@@ -1443,6 +1456,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.actions.showDarkPixelMagnet.setChecked(showDarkPixelMagnetEnabled)
         self._toggle_dark_pixel_magnet_visible(showDarkPixelMagnetEnabled)
+        autoFitEnabled = self.settings.value("edit/autoFit", False, type=bool)
+        self.actions.autoFit.setChecked(autoFitEnabled)
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setAutoFitEnabled(autoFitEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -2848,6 +2865,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.setRightClickEditEnabled(checked)
 
+    def _auto_fit_toggled(self, checked: bool) -> None:
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setAutoFitEnabled(checked)
+
     def setFitWindow(self, value=True):
         if value:
             self.actions.fitWidth.setChecked(False)
@@ -3136,6 +3157,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "view/showDarkPixelMagnet",
             self.actions.showDarkPixelMagnet.isChecked(),
+        )
+        self.settings.setValue(
+            "edit/autoFit",
+            self.actions.autoFit.isChecked(),
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
