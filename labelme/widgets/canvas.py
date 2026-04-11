@@ -6,6 +6,7 @@ import ctypes
 import ctypes.util
 from typing import Literal
 
+import cv2
 import imgviz
 import numpy as np
 import osam
@@ -61,6 +62,192 @@ CURSOR_MOVE = Qt.ClosedHandCursor
 CURSOR_GRAB = Qt.OpenHandCursor
 
 MOVE_SPEED = 5.0
+
+
+class _MagicWandPanel(QtWidgets.QDialog):
+    """Dialog for magic wand parameter adjustment."""
+
+    paramsChanged = QtCore.pyqtSignal()
+    rangeChanged = QtCore.pyqtSignal(int, int)
+    accepted_signal = QtCore.pyqtSignal()
+    rejected_signal = QtCore.pyqtSignal()
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self._canvas = canvas
+        self.setWindowTitle(self.tr("Magic Wand"))
+        self.setWindowFlags(
+            self.windowFlags()
+            & ~Qt.WindowContextHelpButtonHint
+            | Qt.WindowStaysOnTopHint
+        )
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 4, 6, 4)
+        main_layout.setSpacing(4)
+
+        # --- Top area: grid + RGB±5 buttons ---
+        top_layout = QtWidgets.QHBoxLayout()
+
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(2)
+
+        self._r = self._make_spinbox(0, 255, 1)
+        self._g = self._make_spinbox(0, 255, 1)
+        self._b = self._make_spinbox(0, 255, 1)
+        self._tol_r = self._make_spinbox(1, 255, 5)
+        self._tol_g = self._make_spinbox(1, 255, 5)
+        self._tol_b = self._make_spinbox(1, 255, 5)
+        self._range_w = self._make_spinbox(1, 99999, 10)
+        self._range_h = self._make_spinbox(1, 99999, 10)
+
+        grid.addWidget(QtWidgets.QLabel("R"), 0, 0)
+        grid.addWidget(self._r, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("±"), 0, 2)
+        grid.addWidget(self._tol_r, 0, 3)
+
+        grid.addWidget(QtWidgets.QLabel("G"), 1, 0)
+        grid.addWidget(self._g, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("±"), 1, 2)
+        grid.addWidget(self._tol_g, 1, 3)
+
+        grid.addWidget(QtWidgets.QLabel("B"), 2, 0)
+        grid.addWidget(self._b, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("±"), 2, 2)
+        grid.addWidget(self._tol_b, 2, 3)
+
+        grid.addWidget(QtWidgets.QLabel("W"), 3, 0)
+        grid.addWidget(self._range_w, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("H"), 3, 2)
+        grid.addWidget(self._range_h, 3, 3)
+
+        top_layout.addLayout(grid)
+
+        # RGB±5 buttons on the right
+        btn_layout = QtWidgets.QVBoxLayout()
+        btn_layout.addStretch()
+        self._btn_rgb_up = QtWidgets.QPushButton("RGB+5")
+        self._btn_rgb_down = QtWidgets.QPushButton("RGB-5")
+        self._btn_rgb_up.setFixedWidth(56)
+        self._btn_rgb_down.setFixedWidth(56)
+        self._btn_rgb_up.setFocusPolicy(Qt.NoFocus)
+        self._btn_rgb_down.setFocusPolicy(Qt.NoFocus)
+        self._btn_rgb_up.clicked.connect(self._rgb_plus)
+        self._btn_rgb_down.clicked.connect(self._rgb_minus)
+        btn_layout.addWidget(self._btn_rgb_up)
+        btn_layout.addWidget(self._btn_rgb_down)
+        btn_layout.addStretch()
+        top_layout.addLayout(btn_layout)
+
+        main_layout.addLayout(top_layout)
+
+        # --- Bottom: Cancel / OK ---
+        btn_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        btn_box.accepted.connect(self._on_ok)
+        btn_box.rejected.connect(self._on_cancel)
+        main_layout.addWidget(btn_box)
+
+        self._ok_button = btn_box.button(QtWidgets.QDialogButtonBox.Ok)
+
+        for sb in (self._r, self._g, self._b,
+                    self._tol_r, self._tol_g, self._tol_b):
+            sb.valueChanged.connect(self._on_value_changed)
+        self._range_w.valueChanged.connect(self._on_range_changed)
+        self._range_h.valueChanged.connect(self._on_range_changed)
+
+        self.adjustSize()
+
+    def focusDefault(self):
+        """Set default focus to the OK button."""
+        self._ok_button.setFocus()
+
+    def _make_spinbox(self, lo, hi, step):
+        sb = QtWidgets.QSpinBox()
+        sb.setRange(lo, hi)
+        sb.setSingleStep(step)
+        sb.setFixedWidth(60)
+        return sb
+
+    def _rgb_plus(self):
+        """Increase all three tolerances by 5."""
+        for sb in (self._tol_r, self._tol_g, self._tol_b):
+            sb.blockSignals(True)
+            sb.setValue(min(255, sb.value() + 5))
+            sb.blockSignals(False)
+        self.paramsChanged.emit()
+
+    def _rgb_minus(self):
+        """Decrease all three tolerances by 5."""
+        for sb in (self._tol_r, self._tol_g, self._tol_b):
+            sb.blockSignals(True)
+            sb.setValue(max(1, sb.value() - 5))
+            sb.blockSignals(False)
+        self.paramsChanged.emit()
+
+    def _on_ok(self):
+        self.accepted_signal.emit()
+
+    def _on_cancel(self):
+        self.rejected_signal.emit()
+
+    def _on_value_changed(self):
+        self.paramsChanged.emit()
+
+    def _on_range_changed(self):
+        self.rangeChanged.emit(self._range_w.value(), self._range_h.value())
+
+    def setValues(self, r, g, b, tol_r, tol_g, tol_b):
+        for sb in (self._r, self._g, self._b,
+                    self._tol_r, self._tol_g, self._tol_b):
+            sb.blockSignals(True)
+        self._r.setValue(r)
+        self._g.setValue(g)
+        self._b.setValue(b)
+        self._tol_r.setValue(tol_r)
+        self._tol_g.setValue(tol_g)
+        self._tol_b.setValue(tol_b)
+        for sb in (self._r, self._g, self._b,
+                    self._tol_r, self._tol_g, self._tol_b):
+            sb.blockSignals(False)
+
+    def setRange(self, w, h):
+        self._range_w.blockSignals(True)
+        self._range_h.blockSignals(True)
+        self._range_w.setValue(w)
+        self._range_h.setValue(h)
+        self._range_w.blockSignals(False)
+        self._range_h.blockSignals(False)
+
+    def rgb(self):
+        return [self._r.value(), self._g.value(), self._b.value()]
+
+    def tolerances(self):
+        return [self._tol_r.value(), self._tol_g.value(), self._tol_b.value()]
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key_Up, Qt.Key_Down):
+            focused = QtWidgets.QApplication.focusWidget()
+            if isinstance(focused, QtWidgets.QSpinBox):
+                # Spinbox focused: adjust that spinbox by ±5
+                if key == Qt.Key_Up:
+                    focused.setValue(
+                        min(focused.maximum(), focused.value() + 5)
+                    )
+                else:
+                    focused.setValue(
+                        max(focused.minimum(), focused.value() - 5)
+                    )
+                return
+            # No spinbox focused: adjust all ±R/±G/±B
+            if key == Qt.Key_Up:
+                self._rgb_plus()
+            else:
+                self._rgb_minus()
+            return
+        super().keyPressEvent(event)
 
 
 class CanvasMode(enum.Enum):
@@ -136,6 +323,7 @@ class Canvas(QtWidgets.QWidget):
                 "linestrip": False,
                 "ai_polygon": False,
                 "ai_mask": False,
+                "magic_wand": False,
             },
         )
         super().__init__(*args, **kwargs)
@@ -154,6 +342,15 @@ class Canvas(QtWidgets.QWidget):
         self._text_bounding_enabled = False
         self._line_fit_enabled = False
         self._auto_fit_enabled = False
+        self._mw_tolerances: list[int] = [10, 10, 10]
+        self._mw_click_pos: QPointF | None = None
+        self._mw_contour = None
+        self._mw_active: bool = False
+        self._mw_base_rgb: list[int] = [0, 0, 0]
+        self._mw_image = None
+        self._mw_dialog: _MagicWandPanel | None = None
+        self._mw_range_w: int | None = None
+        self._mw_range_h: int | None = None
         self._auto_fit_guides: list[tuple[int, float]] = []
         self._auto_fit_dots: list[tuple[float, float]] = []
         self._auto_fit_count: int = 0
@@ -257,7 +454,7 @@ class Canvas(QtWidgets.QWidget):
         show_crosshair = (
             (self._vertex_dragging and self.prevMovePoint is not None)
             or (self.drawing() and self.current and self.prevMovePoint is not None)
-            or (self.createMode in ["point", "polygon", "rectangle"] and self.drawing() and self.prevMovePoint is not None)
+            or (self.createMode in ["point", "polygon", "rectangle", "magic_wand"] and self.drawing() and self.prevMovePoint is not None)
         ) and not self._near_start_point
 
         # Determine crosshair color
@@ -265,7 +462,7 @@ class Canvas(QtWidgets.QWidget):
             crosshair_color = QtGui.QColor(self.hShape.line_color)
         elif self.current is not None:
             crosshair_color = QtGui.QColor(self.current.line_color)
-        elif self.createMode in ["point", "polygon", "rectangle"]:
+        elif self.createMode in ["point", "polygon", "rectangle", "magic_wand"]:
             crosshair_color = QtGui.QColor(Shape.line_color)
         else:
             crosshair_color = QtGui.QColor(128, 128, 128)
@@ -384,6 +581,7 @@ class Canvas(QtWidgets.QWidget):
             "linestrip",
             "ai_polygon",
             "ai_mask",
+            "magic_wand",
         ]:
             raise ValueError(f"Unsupported createMode: {value}")
         self._createMode = value
@@ -517,6 +715,11 @@ class Canvas(QtWidgets.QWidget):
         self.mode = CanvasMode.EDIT if value else CanvasMode.CREATE
         if self.mode == CanvasMode.EDIT:
             # CREATE -> EDIT
+            if self._mw_active:
+                self._mw_active = False
+                self._mw_contour = None
+                self._mw_image = None
+                self._close_mw_panel()
             self.repaint()  # clear crosshair
         else:
             # EDIT -> CREATE
@@ -549,12 +752,21 @@ class Canvas(QtWidgets.QWidget):
     def _update_status(self, extra_messages: list[str] | None = None) -> None:
         messages: list[str] = []
         if self.drawing():
-            messages.append(self.tr("Creating %r") % self.createMode)
-            messages.append(self._get_create_mode_message())
-            if self.current:
-                messages.append(self.tr("ESC to cancel"))
-            if self.canCloseShape():
-                messages.append(self.tr("Enter or Space to finalize"))
+            if self._mw_active and self.current:
+                r, g, b = self._mw_base_rgb
+                tr, tg, tb = self._mw_tolerances
+                messages.append(
+                    self.tr("魔法の杖: RGB(%d,%d,%d) ±(%d,%d,%d)") % (r, g, b, tr, tg, tb)
+                )
+                messages.append(self.tr("↑↓で±調整"))
+                messages.append(self.tr("Enter確定 / ESCキャンセル"))
+            else:
+                messages.append(self.tr("Creating %r") % self.createMode)
+                messages.append(self._get_create_mode_message())
+                if self.current:
+                    messages.append(self.tr("ESC to cancel"))
+                if self.canCloseShape():
+                    messages.append(self.tr("Enter or Space to finalize"))
         else:
             assert self.editing()
             messages.append(self.tr("Editing shapes"))
@@ -648,10 +860,12 @@ class Canvas(QtWidgets.QWidget):
         if self.drawing():
             if self.createMode in ["ai_polygon", "ai_mask"]:
                 self.line.shape_type = "points"
+            elif self.createMode == "magic_wand":
+                self.line.shape_type = "polygon"
             else:
                 self.line.shape_type = self.createMode
 
-            if self.current or self.createMode in ["point", "polygon", "rectangle"]:
+            if self.current or self.createMode in ["point", "polygon", "rectangle", "magic_wand"]:
                 # Hide cursor when drawing (show crosshair instead)
                 if self._custom_cursor_enabled:
                     self.overrideCursor(self._blank_cursor)
@@ -662,6 +876,10 @@ class Canvas(QtWidgets.QWidget):
             if not self.current:
                 self._updateCursorOverlay()  # Update cursor overlay (no repaint needed)
                 self._update_status()
+                return
+            # Magic wand preview: don't follow mouse
+            if self._mw_active:
+                self._updateCursorOverlay()
                 return
 
             if self.outOfPixmap(pos):
@@ -957,6 +1175,10 @@ class Canvas(QtWidgets.QWidget):
                         self._force_blank_cursor()
                         self.repaint()
                 elif not self.outOfPixmap(pos):
+                    if self.createMode == "magic_wand":
+                        self._magic_wand_select(pos)
+                        return
+
                     if self.createMode in ["ai_polygon", "ai_mask"]:
                         if not download_ai_model(
                             model_name=self._osam_session_model_name, parent=self
@@ -2015,6 +2237,7 @@ class Canvas(QtWidgets.QWidget):
         "snap_range_pixels": 3,
         "resize_base": 2560,
         "margin_pixels": 0.5,
+        "scan_offset_pixels": 10,
     }
     # -- Dark pixel magnet defaults --
     _DPM_DEFAULTS = {
@@ -2598,6 +2821,8 @@ class Canvas(QtWidgets.QWidget):
         d = self._TB_DEFAULTS
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
         min_agreement = rule.get("min_agreement", d["min_agreement"])
+        resize_base = rule.get("resize_base", d["resize_base"])
+        scan_offset_px = rule.get("scan_offset_pixels", d["scan_offset_pixels"])
 
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
@@ -2608,9 +2833,9 @@ class Canvas(QtWidgets.QWidget):
         top = min(p0.y(), p1.y())
         bottom = max(p0.y(), p1.y())
 
-        # Dynamic offset: 1/10 of the short side (constant for all edges)
-        short_side = min(right - left, bottom - top)
-        scan_offset = short_side / 10.0
+        # Fixed offset at resize_base scale (independent of rectangle size)
+        scale = max(img_w, img_h) / resize_base
+        scan_offset = scan_offset_px * scale
         max_scan = int(max(right - left, bottom - top) + scan_offset)
 
         if is_horiz:
@@ -2868,8 +3093,8 @@ class Canvas(QtWidgets.QWidget):
             shape.paint(p)
         if self.current:
             self.current.paint(p)
-            # Don't paint preview line when near start point (hide cursor square)
-            if not self._near_start_point:
+            # Don't paint preview line for magic wand or near start point
+            if not self._mw_active and not self._near_start_point:
                 assert len(self.line.points) == len(self.line.point_labels)
                 self.line.paint(p)
         if self.selectedShapesCopy:
@@ -3003,6 +3228,14 @@ class Canvas(QtWidgets.QWidget):
         ):
             self._drawHoverLabel(p, self.hShape)
 
+        # Draw dot at magic wand click position (same green as shape/cursor)
+        if self._mw_active and self._mw_click_pos is not None:
+            dot_x = self._mw_click_pos.x() * self.scale
+            dot_y = self._mw_click_pos.y() * self.scale
+            p.setPen(Qt.NoPen)
+            p.setBrush(QtGui.QBrush(QtGui.QColor(0, 255, 0, 255)))
+            p.drawEllipse(QPointF(dot_x, dot_y), 4.0, 4.0)
+
         if not self.current or self.createMode not in [
             "polygon",
             "ai_polygon",
@@ -3120,6 +3353,292 @@ class Canvas(QtWidgets.QWidget):
     def outOfPixmap(self, p: QPointF) -> bool:
         w, h = self.pixmap.width(), self.pixmap.height()
         return not (0 <= p.x() <= w - 1 and 0 <= p.y() <= h - 1)
+
+    def _magic_wand_select(self, pos):
+        """Start interactive magic wand selection."""
+        image = labelme.utils.img_qt_to_arr(self.pixmap.toImage())
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+        elif image.shape[2] == 4:
+            image = image[:, :, :3]
+        # img_qt_to_arr returns BGRA (Qt native) — convert to RGB
+        image = image[:, :, ::-1].copy()
+        h, w = image.shape[:2]
+        ix, iy = int(pos.x()), int(pos.y())
+        if not (0 <= ix < w and 0 <= iy < h):
+            return
+        self._mw_image = image
+        self._mw_click_pos = pos
+        self._mw_tolerances = [10, 10, 10]
+        self._mw_base_rgb = image[iy, ix].tolist()
+        self._mw_range_w = None
+        self._mw_range_h = None
+        self._mw_active = True
+        # Create floating panel first so _magic_wand_update can set range
+        if self._mw_dialog is not None:
+            self._mw_dialog.close()
+        self._mw_dialog = _MagicWandPanel(self)
+        self._mw_dialog.setValues(
+            self._mw_base_rgb[0], self._mw_base_rgb[1],
+            self._mw_base_rgb[2],
+            self._mw_tolerances[0], self._mw_tolerances[1], self._mw_tolerances[2],
+        )
+        self._mw_dialog.paramsChanged.connect(self._mw_on_param_changed)
+        self._mw_dialog.rangeChanged.connect(self._mw_on_range_changed)
+        self._mw_dialog.accepted_signal.connect(self._magic_wand_finalize)
+        self._mw_dialog.rejected_signal.connect(self._magic_wand_cancel)
+        self._magic_wand_update()
+        self._mw_dialog.show()
+        self._mw_dialog.focusDefault()
+        self._position_mw_panel()
+
+    def _magic_wand_update(self):
+        """Re-run flood fill with current tolerance and update preview."""
+        pos = self._mw_click_pos
+        image = self._mw_image
+        h, w = image.shape[:2]
+        ix, iy = int(pos.x()), int(pos.y())
+        tolerances = self._mw_tolerances
+
+        # Phase 1: Flood fill (C-level BFS, FIXED_RANGE)
+        # Each pixel is compared to the seed pixel (base_rgb), not its neighbor.
+        # This prevents gradient creep (e.g. dark→white through gradual change).
+        img_work = image.copy()
+        img_work[iy, ix] = self._mw_base_rgb
+        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        lo_diff = (int(tolerances[0]), int(tolerances[1]), int(tolerances[2]))
+        up_diff = lo_diff
+        flags = (
+            8
+            | cv2.FLOODFILL_MASK_ONLY
+            | cv2.FLOODFILL_FIXED_RANGE
+            | (255 << 8)
+        )
+        cv2.floodFill(img_work, flood_mask, (ix, iy), 0, lo_diff, up_diff, flags)
+        filled = flood_mask[1:-1, 1:-1] > 0
+
+        if not np.any(filled):
+            self._mw_contour = None
+            self.current = None
+            self.update()
+            return
+
+        filled_u8 = filled.astype(np.uint8)
+
+        # Apply rectangular range limit from click point
+        if self._mw_range_w is not None or self._mw_range_h is not None:
+            rw = self._mw_range_w if self._mw_range_w is not None else w
+            rh = self._mw_range_h if self._mw_range_h is not None else h
+            rect_mask = np.zeros((h, w), dtype=np.uint8)
+            y0 = max(0, iy - rh)
+            y1 = min(h, iy + rh + 1)
+            x0 = max(0, ix - rw)
+            x1 = min(w, ix + rw + 1)
+            rect_mask[y0:y1, x0:x1] = 1
+            filled_u8 = filled_u8 & rect_mask
+
+        # Contour extraction with 0.2px sub-pixel precision
+        # Upscale mask 5x, extract contour, scale back to get 1/5 = 0.2px steps
+        scale = 5
+        mask_up = cv2.resize(
+            filled_u8, (w * scale, h * scale),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        contours_up, _ = cv2.findContours(
+            mask_up, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours_up:
+            self._mw_contour = None
+            self.current = None
+            self.update()
+            return
+        contour_up = max(contours_up, key=cv2.contourArea)
+        # Scale contour back to original coordinates (float)
+        contour = (contour_up.astype(np.float64) / scale).astype(np.float32)
+        self._mw_contour = contour
+
+        # Compute bounding box half-widths from click point
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        half_w = max(abs(bx - ix), abs(bx + bw - ix))
+        half_h = max(abs(by - iy), abs(by + bh - iy))
+        if self._mw_dialog is not None:
+            self._mw_dialog.setRange(half_w, half_h)
+
+        # Preview polygon (vertex-free)
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, peri * 0.005, True)
+        points = [(float(p[0][0]), float(p[0][1])) for p in approx]
+        if len(points) < 3:
+            self._mw_contour = None
+            self.current = None
+            self.update()
+            return
+
+        shape = Shape(shape_type="polygon")
+        shape._mw_preview = True
+        shape._is_creating = True
+        shape.fill = True
+        # Use line color with fill opacity (same as polygon close preview)
+        r, g, b, _ = shape.line_color.getRgb()
+        fill_alpha = Shape.fill_color.alpha()
+        shape.fill_color = QtGui.QColor(r, g, b, fill_alpha)
+        for x, y in points:
+            shape.addPoint(QPointF(x, y))
+        shape.close()
+        self.current = shape
+        self.update()
+
+    def _mw_on_param_changed(self):
+        """Called when floating panel RGB/tolerance spinbox values change."""
+        if self._mw_dialog is None:
+            return
+        self._mw_base_rgb = self._mw_dialog.rgb()
+        self._mw_tolerances = self._mw_dialog.tolerances()
+        # RGB/tolerance change → no range constraint, show natural extent
+        self._mw_range_w = None
+        self._mw_range_h = None
+        self._magic_wand_update()
+        self._update_status()
+
+    def _mw_on_range_changed(self, rw, rh):
+        """Called when the user manually changes the W/H range spinboxes."""
+        self._mw_range_w = rw
+        self._mw_range_h = rh
+        self._magic_wand_update()
+        self._update_status()
+
+    def _position_mw_panel(self):
+        """Position the magic wand dialog slightly above the click point."""
+        if self._mw_dialog is None or self._mw_click_pos is None:
+            return
+        offset = self.offsetToCenter()
+        cx = (self._mw_click_pos.x() + offset.x()) * self.scale
+        cy = (self._mw_click_pos.y() + offset.y()) * self.scale
+        panel_w = self._mw_dialog.width()
+        panel_h = self._mw_dialog.height()
+        local_x = int(cx - panel_w / 2)
+        local_y = int(cy - panel_h - 80)
+        local_x = max(0, min(local_x, self.width() - panel_w))
+        local_y = max(0, min(local_y, self.height() - panel_h))
+        global_pos = self.mapToGlobal(QPoint(local_x, local_y))
+        self._mw_dialog.move(global_pos)
+
+    def _close_mw_panel(self):
+        """Close and destroy the magic wand panel."""
+        if self._mw_dialog is not None:
+            self._mw_dialog.close()
+            self._mw_dialog.deleteLater()
+            self._mw_dialog = None
+
+    def _magic_wand_cancel(self):
+        """Cancel magic wand selection."""
+        self._mw_active = False
+        self._mw_contour = None
+        self._mw_image = None
+        self._close_mw_panel()
+        self.current = None
+        self.drawingPolygon.emit(False)
+        self._unhide_os_cursor()
+        self.restoreCursor()
+        self.update()
+        self._update_status()
+
+    def _magic_wand_finalize(self):
+        """Show vertex count dialog and finalize magic wand polygon."""
+        if self._mw_contour is None:
+            return
+        peri = cv2.arcLength(self._mw_contour, True)
+        # Recommended: approxPolyDP with moderate epsilon
+        approx = cv2.approxPolyDP(self._mw_contour, peri * 0.005, True)
+        recommended = len(approx)
+
+        count = self._show_vertex_count_dialog(recommended)
+        if count is None:
+            return  # cancelled — stay in preview
+
+        points = self._approx_contour_to_n_vertices(self._mw_contour, count)
+        if len(points) < 3:
+            return
+
+        shape = Shape(shape_type="polygon")
+        shape._is_creating = True
+        for x, y in points:
+            shape.addPoint(QPointF(x, y))
+        self.current = shape
+        self._mw_active = False
+        self._mw_contour = None
+        self._mw_image = None
+        self._close_mw_panel()
+        self.finalise()
+
+    def _update_vertex_preview(self, count):
+        """Update the polygon preview with visible vertices for given count."""
+        if self._mw_contour is None:
+            return
+        points = self._approx_contour_to_n_vertices(self._mw_contour, count)
+        if len(points) < 3:
+            return
+        shape = Shape(shape_type="polygon")
+        shape._is_creating = True
+        shape._mw_preview = False  # show vertices
+        shape.fill = True
+        r, g, b, _ = shape.line_color.getRgb()
+        fill_alpha = Shape.fill_color.alpha()
+        shape.fill_color = QtGui.QColor(r, g, b, fill_alpha)
+        for x, y in points:
+            shape.addPoint(QPointF(x, y))
+        shape.close()
+        self.current = shape
+        self.update()
+
+    def _show_vertex_count_dialog(self, recommended):
+        """Show a dialog to input vertex count with recommended value."""
+        # Show initial vertex preview
+        self._update_vertex_preview(recommended)
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("頂点数")
+        dialog.setWindowFlags(
+            dialog.windowFlags() | Qt.WindowStaysOnTopHint
+        )
+        layout = QtWidgets.QVBoxLayout(dialog)
+        label = QtWidgets.QLabel(
+            f"頂点数を指定 (推奨: {recommended}):"
+        )
+        layout.addWidget(label)
+        spinbox = QtWidgets.QSpinBox()
+        spinbox.setRange(3, 9999)
+        spinbox.setSingleStep(5)
+        spinbox.setValue(recommended)
+        spinbox.valueChanged.connect(self._update_vertex_preview)
+        layout.addWidget(spinbox)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            return spinbox.value()
+        return None
+
+    def _approx_contour_to_n_vertices(self, contour, target_n):
+        """Binary search epsilon to approximate contour to target vertex count."""
+        peri = cv2.arcLength(contour, True)
+        lo, hi = 0.0, peri * 0.5
+        best_pts = cv2.approxPolyDP(contour, peri * 0.02, True)
+        for _ in range(50):
+            mid = (lo + hi) / 2
+            approx = cv2.approxPolyDP(contour, mid, True)
+            n = len(approx)
+            best_pts = approx
+            if n == target_n:
+                break
+            elif n > target_n:
+                lo = mid
+            else:
+                hi = mid
+        return [(float(p[0][0]), float(p[0][1])) for p in best_pts]
 
     def finalise(self):
         assert self.current
@@ -3268,6 +3787,9 @@ class Canvas(QtWidgets.QWidget):
         modifiers = a0.modifiers()
         key = a0.key()
         if self.drawing():
+            # Magic wand interactive mode — keys handled by dialog
+            if self._mw_active and self.current:
+                return
             if key == Qt.Key_Escape and self.current:
                 self.current = None
                 self.drawingPolygon.emit(False)
@@ -3539,6 +4061,10 @@ class Canvas(QtWidgets.QWidget):
         )
 
     def resetState(self):
+        self._close_mw_panel()
+        self._mw_active = False
+        self._mw_contour = None
+        self._mw_image = None
         self.restoreCursor()
         self.pixmap = QtGui.QPixmap()
         self._pixmap_hash = None

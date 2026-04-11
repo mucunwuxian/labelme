@@ -576,6 +576,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing circles"),
             enabled=False,
         )
+        createCircleMode.setVisible(False)
         createLineMode = action(
             self.tr("Create Line"),
             lambda: self._switch_canvas_mode(edit=False, createMode="line"),
@@ -584,6 +585,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing lines"),
             enabled=False,
         )
+        createLineMode.setVisible(False)
         createPointMode = action(
             self.tr("Create Point"),
             lambda: self._switch_canvas_mode(edit=False, createMode="point"),
@@ -592,6 +594,15 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("Start drawing points"),
             enabled=False,
         )
+        createMagicWandMode = action(
+            self.tr("魔法の杖で\nポリゴン作成"),
+            lambda: self._switch_canvas_mode(edit=False, createMode="magic_wand"),
+            None,
+            "magic-wand.svg",
+            self.tr("魔法の杖でポリゴンを作成"),
+            enabled=False,
+        )
+        createMagicWandMode.setVisible(False)
         createLineStripMode = action(
             self.tr("Create LineStrip"),
             lambda: self._switch_canvas_mode(edit=False, createMode="linestrip"),
@@ -600,6 +611,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing linestrip. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
+        createLineStripMode.setVisible(False)
         createAiPolygonMode = action(
             self.tr("Create AI-Polygon"),
             lambda: self._switch_canvas_mode(edit=False, createMode="ai_polygon"),
@@ -608,6 +620,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing ai_polygon. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
+        createAiPolygonMode.setVisible(False)
         createAiMaskMode = action(
             self.tr("Create AI-Mask"),
             lambda: self._switch_canvas_mode(edit=False, createMode="ai_mask"),
@@ -616,6 +629,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing ai_mask. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
+        createAiMaskMode.setVisible(False)
         editMode = action(
             self.tr("Edit Polygons"),
             lambda: self._switch_canvas_mode(edit=True),
@@ -657,8 +671,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Paste copied polygons"),
             enabled=False,
         )
+        removeHighIouShapes = action(
+            self.tr("IoU0.9超シェイプを除去"),
+            self.removeHighIouShapes,
+            None,
+            None,
+            self.tr("IoUが0.9を超える重複シェイプのうち後に作られた方を除去"),
+            enabled=False,
+        )
+        copyFromSpecifiedJson = action(
+            self.tr("指定のJSONのシェイプを全複製"),
+            self.copyShapesFromSpecifiedJson,
+            None,
+            None,
+            self.tr("指定したJSONファイルのシェイプを全て複製"),
+            enabled=False,
+        )
         copyFromPrevJson = action(
-            self.tr("直前JSONのシェイプを全複製"),
+            self.tr("1つ上のJSONのシェイプを全複製"),
             self.copyShapesFromPreviousJson,
             None,
             None,
@@ -666,7 +696,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ファイル一覧を遡り、最初に見つかる保存済みJSONの"
                 "シェイプを全て複製"
             ),
-            enabled=True,
+            enabled=False,
         )
         autoFit = action(
             self.tr("フィッティングをオートで行う"),
@@ -713,6 +743,42 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         redo.setVisible(False)
 
+        showCreateCircle = action(
+            self.tr("円を作成ボタンを表示"),
+            self._toggle_create_circle_visible,
+            checkable=True,
+            checked=False,
+        )
+        showCreateLine = action(
+            self.tr("直線を作成ボタンを表示"),
+            self._toggle_create_line_visible,
+            checkable=True,
+            checked=False,
+        )
+        showCreateLineStrip = action(
+            self.tr("折れ線を作成ボタンを表示"),
+            self._toggle_create_linestrip_visible,
+            checkable=True,
+            checked=False,
+        )
+        showCreateAiPolygon = action(
+            self.tr("AIポリゴンを作成ボタンを表示"),
+            self._toggle_create_ai_polygon_visible,
+            checkable=True,
+            checked=False,
+        )
+        showCreateAiMask = action(
+            self.tr("AIマスクを作成ボタンを表示"),
+            self._toggle_create_ai_mask_visible,
+            checkable=True,
+            checked=False,
+        )
+        showCreateMagicWand = action(
+            self.tr("魔法の杖を作成ボタンを表示"),
+            self._toggle_create_magic_wand_visible,
+            checkable=True,
+            checked=False,
+        )
         showRedo = action(
             self.tr("やり直すボタンを表示"),
             self._toggle_redo_visible,
@@ -1106,6 +1172,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createCircleMode=createCircleMode,
             createLineMode=createLineMode,
             createPointMode=createPointMode,
+            createMagicWandMode=createMagicWandMode,
             createLineStripMode=createLineStripMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
@@ -1118,6 +1185,12 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
             redo=redo,
+            showCreateCircle=showCreateCircle,
+            showCreateLine=showCreateLine,
+            showCreateLineStrip=showCreateLineStrip,
+            showCreateAiPolygon=showCreateAiPolygon,
+            showCreateAiMask=showCreateAiMask,
+            showCreateMagicWand=showCreateMagicWand,
             showRedo=showRedo,
             showParallelLineDist=showParallelLineDist,
             showTextBounding=showTextBounding,
@@ -1126,6 +1199,7 @@ class MainWindow(QtWidgets.QMainWindow):
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
             autoFit=autoFit,
+            copyFromPrevJson=copyFromPrevJson,
         )
         self.on_shapes_present_actions = (saveAs, hideAll, showAll, toggleAll)
 
@@ -1139,6 +1213,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("ai_polygon", createAiPolygonMode),
             ("ai_mask", createAiMaskMode),
         ]
+        # Magic wand uses its own createMode, managed separately
+        self._magic_wand_action = createMagicWandMode
 
         # Group zoom controls into a list for easier toggling.
         self.zoom_actions = (
@@ -1156,10 +1232,14 @@ class MainWindow(QtWidgets.QMainWindow):
             createCircleMode,
             createLineMode,
             createPointMode,
+            createMagicWandMode,
             createLineStripMode,
             createAiPolygonMode,
             createAiMaskMode,
             brightnessContrast,
+            removeHighIouShapes,
+            copyFromSpecifiedJson,
+            copyFromPrevJson,
         )
         # menu shown at right click
         self.context_menu_actions = (
@@ -1188,6 +1268,8 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             autoFit,
             None,
+            removeHighIouShapes,
+            copyFromSpecifiedJson,
             copyFromPrevJson,
         )
 
@@ -1249,7 +1331,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 brightnessContrast,
                 self.actions.toggle_keep_prev_brightness_contrast,
                 None,
+                showCreateMagicWand,
+                showCreateCircle,
+                showCreateLine,
+                showCreateLineStrip,
+                showCreateAiPolygon,
+                showCreateAiMask,
                 showRedo,
+                None,
                 showLineFit,
                 showParallelLineDist,
                 showTextBounding,
@@ -1330,16 +1419,21 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.addToolBar(Qt.TopToolBarArea, tools_toolbar)
         self._tools_toolbar = tools_toolbar
-        self.addToolBar(
-            Qt.LeftToolBarArea,
-            ToolBar(
-                title="CreateShapeTools",
-                actions=[a for _, a in self.draw_actions],
-                orientation=Qt.Vertical,
-                button_style=Qt.ToolButtonTextUnderIcon,
-                font_base=self.font(),
-            ),
+        # Build left toolbar: insert magic wand after point
+        left_actions = []
+        for mode, act in self.draw_actions:
+            left_actions.append(act)
+            if mode == "point":
+                left_actions.append(self._magic_wand_action)
+        create_toolbar = ToolBar(
+            title="CreateShapeTools",
+            actions=left_actions,
+            orientation=Qt.Vertical,
+            button_style=Qt.ToolButtonTextUnderIcon,
+            font_base=self.font(),
         )
+        self.addToolBar(Qt.LeftToolBarArea, create_toolbar)
+        self._create_toolbar = create_toolbar
 
         self.status_left = QtWidgets.QLabel(self.tr("%s started.") % __appname__)
         self.status_right = StatusStats()
@@ -1434,6 +1528,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "canvas/parallelLineDist", False, type=bool
         )
         self.parallelLineDistCheckbox.setChecked(parallelLineDistEnabled)
+        for key, toggle_fn in (
+            ("showCreateCircle", self._toggle_create_circle_visible),
+            ("showCreateLine", self._toggle_create_line_visible),
+            ("showCreateLineStrip", self._toggle_create_linestrip_visible),
+            ("showCreateAiPolygon", self._toggle_create_ai_polygon_visible),
+            ("showCreateAiMask", self._toggle_create_ai_mask_visible),
+            ("showCreateMagicWand", self._toggle_create_magic_wand_visible),
+        ):
+            enabled = self.settings.value(f"view/{key}", False, type=bool)
+            getattr(self.actions, key).setChecked(enabled)
+            toggle_fn(enabled)
         showRedoEnabled = self.settings.value("view/showRedo", False, type=bool)
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
@@ -1650,6 +1755,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 # File mode: {filename}
                 display_path = osp.basename(self.imagePath)
             window_title = f"{window_title} - {display_path}"
+            if not self.image.isNull():
+                window_title = (
+                    f"{window_title} "
+                    f"(w{self.image.width()} x h{self.image.height()})"
+                )
             if self.fileListWidget.count() and self.fileListWidget.currentItem():
                 window_title = (
                     f"{window_title} "
@@ -1718,6 +1828,10 @@ class MainWindow(QtWidgets.QMainWindow):
             z.setEnabled(value)
         for action in self.on_load_active_actions:
             action.setEnabled(value)
+        if value:
+            # Disable "1つ上のJSON" when on the first file
+            if self.fileListWidget.currentRow() <= 0:
+                self.actions.copyFromPrevJson.setEnabled(False)
 
     def queueEvent(self, function):
         QtCore.QTimer.singleShot(0, function)
@@ -1880,6 +1994,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if edit:
             for _, draw_action in self.draw_actions:
                 draw_action.setEnabled(True)
+            self._magic_wand_action.setEnabled(True)
         self.actions.editMode.setEnabled(not edit)
 
     def _switch_canvas_mode(
@@ -1891,9 +2006,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if edit:
             for _, draw_action in self.draw_actions:
                 draw_action.setEnabled(True)
+            self._magic_wand_action.setEnabled(True)
         else:
             for draw_mode, draw_action in self.draw_actions:
                 draw_action.setEnabled(createMode != draw_mode)
+            self._magic_wand_action.setEnabled(createMode != "magic_wand")
         self.actions.editMode.setEnabled(not edit)
         self._ai_text_to_annotation_widget.setEnabled(
             not edit and createMode in _AI_TEXT_TO_ANNOTATION_CREATE_MODE_TO_SHAPE_TYPE
@@ -2402,6 +2519,160 @@ class MainWindow(QtWidgets.QMainWindow):
         self._copied_shapes = [s.copy() for s in self.canvas.selectedShapes]
         self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
 
+    def _loadShapesFromJsonFile(self, label_file: str) -> bool:
+        """Load shapes from a JSON label file and append to current canvas.
+
+        Returns True if shapes were loaded successfully.
+        """
+        try:
+            lf = LabelFile(label_file)
+        except LabelFileError:
+            return False
+        if not lf.shapes:
+            return False
+        shapes: list[Shape] = []
+        for sd in lf.shapes:
+            shape = Shape(
+                label=sd["label"],
+                shape_type=sd["shape_type"],
+                group_id=sd["group_id"],
+                description=sd.get("description", ""),
+                mask=sd.get("mask"),
+            )
+            points = sd["points"]
+            if sd["shape_type"] == "rectangle" and len(points) == 4:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                points = [[min(xs), min(ys)], [max(xs), max(ys)]]
+            for x, y in points:
+                shape.addPoint(QtCore.QPointF(x, y))
+            shape.close()
+            default_flags = {}
+            if self._config["label_flags"]:
+                for pattern, keys in self._config["label_flags"].items():
+                    if isinstance(shape.label, str) and re.match(
+                        pattern, shape.label
+                    ):
+                        for key in keys:
+                            default_flags[key] = False
+            shape.flags = default_flags
+            shape.flags.update(sd.get("flags", {}))
+            shape.other_data = sd.get("other_data", {})
+            shape.modified_at = None
+            shapes.append(shape)
+        self._load_shapes(shapes=shapes, replace=False)
+        self.setDirty()
+        return True
+
+    def removeHighIouShapes(self):
+        """Remove duplicate shapes whose IoU exceeds 0.9, keeping the older one."""
+        shapes = self.canvas.shapes
+        if len(shapes) < 2:
+            return
+
+        def _bbox(shape):
+            rect = shape.boundingRect()
+            return rect.x(), rect.y(), rect.right(), rect.bottom()
+
+        def _iou(a, b):
+            ax1, ay1, ax2, ay2 = _bbox(a)
+            bx1, by1, bx2, by2 = _bbox(b)
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            if inter == 0:
+                return 0.0
+            area_a = (ax2 - ax1) * (ay2 - ay1)
+            area_b = (bx2 - bx1) * (by2 - by1)
+            union = area_a + area_b - inter
+            return inter / union if union > 0 else 0.0
+
+        to_remove: set[int] = set()
+        for i in range(len(shapes)):
+            if i in to_remove:
+                continue
+            for j in range(i + 1, len(shapes)):
+                if j in to_remove:
+                    continue
+                if _iou(shapes[i], shapes[j]) > 0.9:
+                    # Keep the one with modified_at set; if both set, keep newer
+                    ts_i = shapes[i].modified_at
+                    ts_j = shapes[j].modified_at
+                    if ts_i and not ts_j:
+                        # i has timestamp, j doesn't → remove j
+                        to_remove.add(j)
+                    elif ts_j and not ts_i:
+                        # j has timestamp, i doesn't → remove i
+                        to_remove.add(i)
+                        break
+                    elif ts_i and ts_j:
+                        # Both have timestamps → remove older
+                        if ts_i < ts_j:
+                            to_remove.add(i)
+                            break
+                        else:
+                            to_remove.add(j)
+                    else:
+                        # Neither has timestamp → remove either
+                        to_remove.add(j)
+
+        if not to_remove:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.tr("IoU0.9超シェイプを除去"),
+                self.tr("IoU0.9超の重複シェイプはありません。"),
+            )
+            return
+
+        count = len(to_remove)
+        yes = QtWidgets.QMessageBox.Yes
+        no = QtWidgets.QMessageBox.No
+        result = QtWidgets.QMessageBox.question(
+            self,
+            self.tr("IoU0.9超シェイプを除去"),
+            self.tr("IoU0.9超の重複シェイプが%d個あります。除去しますか？") % count,
+            yes | no,
+            yes,
+        )
+        if result != yes:
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            removed_shapes = [shapes[idx] for idx in sorted(to_remove, reverse=True)]
+            for shape in removed_shapes:
+                self.canvas.deleteShape(shape)
+            self.remLabels(removed_shapes)
+            self.setDirty()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        QtWidgets.QMessageBox.information(
+            self,
+            self.tr("IoU0.9超シェイプを除去"),
+            self.tr("%d個のシェイプを除去しました。") % count,
+        )
+
+    def copyShapesFromSpecifiedJson(self):
+        """Open a file dialog to select a JSON file and copy all its shapes."""
+        caption = self.tr("シェイプ複製元のJSONファイルを選択")
+        start_dir = self.currentPath() if self.filename else "."
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            caption,
+            start_dir,
+            self.tr("Label files (*.json)"),
+        )
+        if not filename:
+            return
+        if not self._loadShapesFromJsonFile(filename):
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("エラー"),
+                self.tr("シェイプを読み込めませんでした。"),
+            )
+
     def copyShapesFromPreviousJson(self):
         """Copy all shapes from the nearest previous file that has a saved JSON."""
         current_row = self.fileListWidget.currentRow()
@@ -2416,46 +2687,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 label_file = osp.join(self.output_dir, osp.basename(label_file))
             if not osp.exists(label_file):
                 continue
-            try:
-                lf = LabelFile(label_file)
-            except LabelFileError:
-                continue
-            if not lf.shapes:
-                continue
-            # Convert ShapeDicts to Shape objects
-            shapes: list[Shape] = []
-            for sd in lf.shapes:
-                shape = Shape(
-                    label=sd["label"],
-                    shape_type=sd["shape_type"],
-                    group_id=sd["group_id"],
-                    description=sd.get("description", ""),
-                    mask=sd.get("mask"),
-                )
-                points = sd["points"]
-                if sd["shape_type"] == "rectangle" and len(points) == 4:
-                    xs = [p[0] for p in points]
-                    ys = [p[1] for p in points]
-                    points = [[min(xs), min(ys)], [max(xs), max(ys)]]
-                for x, y in points:
-                    shape.addPoint(QtCore.QPointF(x, y))
-                shape.close()
-                default_flags = {}
-                if self._config["label_flags"]:
-                    for pattern, keys in self._config["label_flags"].items():
-                        if isinstance(shape.label, str) and re.match(
-                            pattern, shape.label
-                        ):
-                            for key in keys:
-                                default_flags[key] = False
-                shape.flags = default_flags
-                shape.flags.update(sd.get("flags", {}))
-                shape.other_data = sd.get("other_data", {})
-                shape.modified_at = None  # Mark as not yet updated
-                shapes.append(shape)
-            self._load_shapes(shapes=shapes, replace=False)
-            self.setDirty()
-            return
+            if self._loadShapesFromJsonFile(label_file):
+                return
 
         QtWidgets.QMessageBox.warning(
             self,
@@ -2864,6 +3097,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_darkPixelMagnetAction"):
             self._darkPixelMagnetAction.setVisible(checked)
 
+    def _toggle_create_button_visible(self, action_name: str, checked: bool) -> None:
+        act = getattr(self.actions, action_name, None)
+        if act is None:
+            return
+        act.setVisible(checked)
+        for tb in (
+            getattr(self, "_tools_toolbar", None),
+            getattr(self, "_create_toolbar", None),
+        ):
+            if tb is None:
+                continue
+            buttons = getattr(tb, "_action_buttons", {})
+            toolbar_action = buttons.get(act)
+            if toolbar_action is not None:
+                toolbar_action.setVisible(checked)
+
+    def _toggle_create_circle_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createCircleMode", checked)
+
+    def _toggle_create_line_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createLineMode", checked)
+
+    def _toggle_create_linestrip_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createLineStripMode", checked)
+
+    def _toggle_create_ai_polygon_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createAiPolygonMode", checked)
+
+    def _toggle_create_ai_mask_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createAiMaskMode", checked)
+
+    def _toggle_create_magic_wand_visible(self, checked: bool) -> None:
+        act = self._magic_wand_action
+        act.setVisible(checked)
+        for tb in (
+            getattr(self, "_tools_toolbar", None),
+            getattr(self, "_create_toolbar", None),
+        ):
+            if tb is None:
+                continue
+            buttons = getattr(tb, "_action_buttons", {})
+            toolbar_action = buttons.get(act)
+            if toolbar_action is not None:
+                toolbar_action.setVisible(checked)
+
     def _toggle_redo_visible(self, checked: bool) -> None:
         self.actions.redo.setVisible(checked)
         if hasattr(self, "_tools_toolbar"):
@@ -3151,6 +3429,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "canvas/parallelLineDist",
             self.parallelLineDistCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showCreateCircle", self.actions.showCreateCircle.isChecked()
+        )
+        self.settings.setValue(
+            "view/showCreateLine", self.actions.showCreateLine.isChecked()
+        )
+        self.settings.setValue(
+            "view/showCreateLineStrip",
+            self.actions.showCreateLineStrip.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showCreateAiPolygon",
+            self.actions.showCreateAiPolygon.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showCreateAiMask",
+            self.actions.showCreateAiMask.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showCreateMagicWand",
+            self.actions.showCreateMagicWand.isChecked(),
         )
         self.settings.setValue(
             "view/showRedo", self.actions.showRedo.isChecked()

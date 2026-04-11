@@ -82,6 +82,7 @@ class Shape:
         self.other_data = {}
         self.mask = mask
         self.modified_at = datetime.now().isoformat()
+        self._mw_preview = False  # Magic wand preview: skip vertex drawing
 
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
@@ -312,16 +313,18 @@ class Shape:
                     line_path.lineTo(self._scale_point(self.points[0]))
 
             painter.drawPath(line_path)
-            # Draw start vertex in white when creating
-            if self._is_creating and start_vrtx_path.length() > 0:
-                painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
-                painter.drawPath(start_vrtx_path)
-            if vrtx_path.length() > 0:
-                # Hide vertex only for selected shape during vertex dragging
-                # Non-selected shapes always show their vertices
-                if not self._is_line_preview and (not self.selected or not Shape.hide_vertex_outline):
-                    painter.fillPath(vrtx_path, self._current_vertex_fill_color)
-                    painter.drawPath(vrtx_path)
+            # Skip vertex drawing for magic wand preview
+            if not self._mw_preview:
+                # Draw start vertex in white when creating
+                if self._is_creating and start_vrtx_path.length() > 0:
+                    painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
+                    painter.drawPath(start_vrtx_path)
+                if vrtx_path.length() > 0:
+                    # Hide vertex only for selected shape during vertex dragging
+                    # Non-selected shapes always show their vertices
+                    if not self._is_line_preview and (not self.selected or not Shape.hide_vertex_outline):
+                        painter.fillPath(vrtx_path, self._current_vertex_fill_color)
+                        painter.drawPath(vrtx_path)
             if self.fill and self.shape_type not in [
                 "line",
                 "linestrip",

@@ -83,6 +83,7 @@ canvas:
     linestrip: false
     ai_polygon: false
     ai_mask: false
+    magic_wand: false
 
 # Parallel line magnet: rectangle edge snaps to parallel lines in the image.
 # Only active for rectangle edge midpoint drag with matching target_label.
@@ -108,6 +109,7 @@ parallel_line_magnet: []
 #       resize_base: 2560           # letterbox resize reference (longer side)
 #       margin_pixels: 0.5          # offset from boundary (at resize_base scale)
 #       snap_range_pixels: 3        # ±3px lock zone (at resize_base scale)
+#       scan_offset_pixels: 10      # background sampling offset from edge (at resize_base scale)
 #       luminance_threshold: 30
 #       min_agreement: 6
 text_bounding_magnet: []
