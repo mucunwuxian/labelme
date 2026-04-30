@@ -193,7 +193,7 @@ class LabelListWidget(QtWidgets.QListView):
             item = cast(LabelListWidgetItem, item)
             if item.shape() == shape:
                 return item
-        raise ValueError(f"cannot find shape: {shape}")
+        return None
 
     def clear(self):
         self._model.clear()

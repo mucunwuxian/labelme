@@ -107,18 +107,48 @@ _AI_TEXT_TO_ANNOTATION_CREATE_MODE_TO_SHAPE_TYPE: dict[
 }
 
 
+class _FileListItemDelegate(QtWidgets.QStyledItemDelegate):
+    """Render selection as a border overlay so the item's own background
+    (the mtime-gradient color set via setBackground) remains visible."""
+
+    BORDER_COLOR = QtGui.QColor(13, 71, 161)
+    BORDER_WIDTH = 2
+
+    def paint(self, painter, option, index):
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        is_selected = bool(opt.state & QtWidgets.QStyle.State_Selected)
+        # Strip the Selected state so super paints the item's own background
+        # (no gray/blue system selection overlay).
+        opt.state &= ~QtWidgets.QStyle.State_Selected
+        super().paint(painter, opt, index)
+        if is_selected:
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            pen = QtGui.QPen(self.BORDER_COLOR, self.BORDER_WIDTH)
+            pen.setJoinStyle(Qt.MiterJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            inset = self.BORDER_WIDTH / 2
+            rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
+            painter.drawRect(rect)
+            painter.restore()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     _config_file: Path | None
     _config: dict
 
-    # Light blue background for annotated files (already annotated when opened)
-    FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, 20)  # rgba with low alpha
-    # Darker blue for files newly saved in this session
-    FILE_NEWLY_SAVED_COLOR = QtGui.QColor(30, 136, 229, 40)  # rgba with higher alpha
+    # File list background color: blue, alpha gradient by mtime (oldest=20, newest=70)
+    FILE_COLOR_RGB = (30, 136, 229)
+    FILE_ALPHA_MIN = 20  # oldest mtime (薄い青)
+    FILE_ALPHA_MAX = 70  # newest mtime (濃い青)
+    FILE_ANNOTATED_COLOR = QtGui.QColor(30, 136, 229, FILE_ALPHA_MIN)  # legacy fallback (alpha 20)
+    FILE_NEWLY_SAVED_COLOR = QtGui.QColor(30, 136, 229, FILE_ALPHA_MAX)  # legacy fallback (alpha 70)
     # Red background for shapes without modification timestamp
     SHAPE_UNMODIFIED_COLOR = QtGui.QColor(229, 57, 53, 20)  # rgba with low alpha (matching file list style)
     # Predefined zoom levels (in percent)
-    ZOOM_LEVELS = (25, 33, 50, 67, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1150, 1300, 1450, 1600, 1800, 2000)
+    ZOOM_LEVELS = (25, 33, 50, 67, 80, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1150, 1300, 1450, 1600, 1800, 2000)
 
     filename: str | None
     _text_osam_session: OsamSession | None = None
@@ -131,6 +161,9 @@ class MainWindow(QtWidgets.QMainWindow):
     _initially_annotated_files: set[str]  # Files already annotated when dir was opened
     _current_file_row: int  # Row index of the currently loaded file in the file list
     _other_data: dict | None
+    # mtime cache for gradient coloring of file list (path → mtime)
+    _file_mtimes: dict[str, float]
+    _file_mtime_range: tuple[float, float] | None
 
     # NB: this tells Mypy etc. that `actions` here
     #     is a different type cf. the parent class
@@ -197,6 +230,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prev_opened_dir = None
         self._initially_annotated_files: set[str] = set()
         self._current_file_row: int = -1
+        self._file_mtimes = {}
+        self._file_mtime_range = None
 
         # Navigator (minimap)
         self.navigator, self.navigator_dock = self._create_navigator_dock()
@@ -250,6 +285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileSearch.textChanged.connect(self.fileSearchChanged)
         self.fileListWidget = QtWidgets.QListWidget()
         self.fileListWidget.setStyleSheet("QListWidget::item { min-height: 24px; padding: -3px; }")
+        self.fileListWidget.setItemDelegate(_FileListItemDelegate(self.fileListWidget))
         self.fileListWidget.itemSelectionChanged.connect(self.fileSelectionChanged)
         fileListLayout = QtWidgets.QVBoxLayout()
         fileListLayout.setContentsMargins(0, 0, 0, 0)
@@ -295,6 +331,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lineWidthWidget.valueChanged.connect(self._line_width_changed)
         self.lineWidthWidget.setValue(6)  # Default line width
 
+        # Point object size spinbox (applies only to point shape_type)
+        self.pointObjectSizeWidget = QtWidgets.QSpinBox()
+        self.pointObjectSizeWidget.setRange(4, 96)
+        self.pointObjectSizeWidget.setSuffix(" px")
+        self.pointObjectSizeWidget.valueChanged.connect(
+            self._point_object_size_changed
+        )
+        self.pointObjectSizeWidget.setValue(24)
+
+        # Vertex size spinbox (applies to polygon/rectangle vertices)
+        self.vertexSizeWidget = QtWidgets.QSpinBox()
+        self.vertexSizeWidget.setRange(2, 32)
+        self.vertexSizeWidget.setSuffix(" px")
+        self.vertexSizeWidget.valueChanged.connect(self._vertex_size_changed)
+        self.vertexSizeWidget.setValue(8)
+
         self.customCursorCheckbox = QtWidgets.QCheckBox()
         self.customCursorCheckbox.toggled.connect(self._custom_cursor_toggled)
 
@@ -323,6 +375,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.darkPixelMagnetCheckbox = QtWidgets.QCheckBox()
         self.darkPixelMagnetCheckbox.toggled.connect(
             self._dark_pixel_magnet_toggled
+        )
+
+        self.autoFitCheckbox = QtWidgets.QCheckBox()
+        self.autoFitCheckbox.toggled.connect(
+            self._auto_fit_toggled
         )
 
         self.setAcceptDrops(True)
@@ -542,16 +599,6 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("Close current file"),
         )
 
-        toggle_keep_prev_mode = action(
-            self.tr("Keep Previous Annotation"),
-            self.toggleKeepPrevMode,
-            shortcuts["toggle_keep_prev_mode"],
-            None,
-            self.tr('Toggle "keep previous annotation" mode'),
-            checkable=True,
-        )
-        toggle_keep_prev_mode.setChecked(self._config["keep_prev"])
-
         createMode = action(
             self.tr("Create Polygons"),
             lambda: self._switch_canvas_mode(edit=False, createMode="polygon"),
@@ -672,42 +719,75 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         removeHighIouShapes = action(
-            self.tr("IoU0.9超シェイプを除去"),
+            self.tr("IoU0.9超の\nポリゴン削除"),
             self.removeHighIouShapes,
             None,
-            None,
-            self.tr("IoUが0.9を超える重複シェイプのうち後に作られた方を除去"),
+            "remove-duplicate-polygon.svg",
+            self.tr("IoUが0.9を超える重複ポリゴンのうち後に作られた方を削除"),
             enabled=False,
         )
         copyFromSpecifiedJson = action(
-            self.tr("指定のJSONのシェイプを全複製"),
+            self.tr("指定ファイルの\nポリゴン全複製"),
             self.copyShapesFromSpecifiedJson,
             None,
-            None,
-            self.tr("指定したJSONファイルのシェイプを全て複製"),
+            "file-polygon.svg",
+            self.tr("指定したJSONファイルのポリゴンを全て複製"),
             enabled=False,
         )
         copyFromPrevJson = action(
-            self.tr("1つ上のJSONのシェイプを全複製"),
+            self.tr("1つ上のファイルの\nポリゴン全複製"),
             self.copyShapesFromPreviousJson,
             None,
-            None,
+            "file-polygon-up.svg",
             self.tr(
                 "ファイル一覧を遡り、最初に見つかる保存済みJSONの"
-                "シェイプを全て複製"
+                "ポリゴンを全て複製"
             ),
             enabled=False,
         )
-        autoFit = action(
-            self.tr("フィッティングをオートで行う"),
-            self._auto_fit_toggled,
-            None,
-            None,
-            self.tr("シェイプ移動時にフィッティングを自動適用"),
+        showAutoFit = action(
+            self.tr("矩形移動時に自動フィットを表示"),
+            self._toggle_auto_fit_visible,
             checkable=True,
-            enabled=True,
+            checked=False,
         )
-        autoFit.setChecked(False)
+
+        showLineOpacity = action(
+            self.tr("線の透明度を表示"),
+            self._toggle_line_opacity_visible,
+            checkable=True,
+            checked=True,
+        )
+        showPointOpacity = action(
+            self.tr("頂点の透明度を表示"),
+            self._toggle_point_opacity_visible,
+            checkable=True,
+            checked=True,
+        )
+        showFillOpacity = action(
+            self.tr("塗りの透明度を表示"),
+            self._toggle_fill_opacity_visible,
+            checkable=True,
+            checked=True,
+        )
+        showLineWidth = action(
+            self.tr("線の太さを表示"),
+            self._toggle_line_width_visible,
+            checkable=True,
+            checked=True,
+        )
+        showPointObjectSize = action(
+            self.tr("点の大きさを表示"),
+            self._toggle_point_object_size_visible,
+            checkable=True,
+            checked=True,
+        )
+        showVertexSize = action(
+            self.tr("頂点の大きさを表示"),
+            self._toggle_vertex_size_visible,
+            checkable=True,
+            checked=True,
+        )
         undoLastPoint = action(
             self.tr("Undo last point"),
             self.canvas.undoLastPoint,
@@ -784,6 +864,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._toggle_redo_visible,
             checkable=True,
             checked=False,
+        )
+        showRemoveHighIouShapes = action(
+            self.tr("IoU0.9超のポリゴン削除ボタンを表示"),
+            self._toggle_remove_high_iou_visible,
+            checkable=True,
+            checked=True,
+        )
+        showCopyFromSpecifiedJson = action(
+            self.tr("指定ファイルのポリゴン全複製ボタンを表示"),
+            self._toggle_copy_from_specified_json_visible,
+            checkable=True,
+            checked=True,
+        )
+        showCopyFromPrevJson = action(
+            self.tr("1つ上のファイルのポリゴン全複製ボタンを表示"),
+            self._toggle_copy_from_prev_json_visible,
+            checkable=True,
+            checked=True,
         )
 
         showParallelLineDist = action(
@@ -864,6 +962,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lineOpacityBoxLayout.addWidget(self.lineOpacityWidget)
         lineOpacity.setDefaultWidget(QtWidgets.QWidget())
         lineOpacity.defaultWidget().setLayout(lineOpacityBoxLayout)
+        self._lineOpacityAction = lineOpacity
 
         # Point opacity widget
         pointOpacity = QtWidgets.QWidgetAction(self)
@@ -874,6 +973,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pointOpacityBoxLayout.addWidget(self.pointOpacityWidget)
         pointOpacity.setDefaultWidget(QtWidgets.QWidget())
         pointOpacity.defaultWidget().setLayout(pointOpacityBoxLayout)
+        self._pointOpacityAction = pointOpacity
 
         # Fill opacity widget
         fillOpacity = QtWidgets.QWidgetAction(self)
@@ -884,6 +984,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fillOpacityBoxLayout.addWidget(self.fillOpacityWidget)
         fillOpacity.setDefaultWidget(QtWidgets.QWidget())
         fillOpacity.defaultWidget().setLayout(fillOpacityBoxLayout)
+        self._fillOpacityAction = fillOpacity
 
         # Line width widget
         lineWidth = QtWidgets.QWidgetAction(self)
@@ -894,6 +995,29 @@ class MainWindow(QtWidgets.QMainWindow):
         lineWidthBoxLayout.addWidget(self.lineWidthWidget)
         lineWidth.setDefaultWidget(QtWidgets.QWidget())
         lineWidth.defaultWidget().setLayout(lineWidthBoxLayout)
+        self._lineWidthAction = lineWidth
+
+        # Point object size widget (point shape_type only)
+        pointObjectSize = QtWidgets.QWidgetAction(self)
+        pointObjectSizeBoxLayout = QtWidgets.QVBoxLayout()
+        pointObjectSizeLabel = QtWidgets.QLabel(self.tr("点の大きさ"))
+        pointObjectSizeLabel.setAlignment(Qt.AlignCenter)
+        pointObjectSizeBoxLayout.addWidget(pointObjectSizeLabel)
+        pointObjectSizeBoxLayout.addWidget(self.pointObjectSizeWidget)
+        pointObjectSize.setDefaultWidget(QtWidgets.QWidget())
+        pointObjectSize.defaultWidget().setLayout(pointObjectSizeBoxLayout)
+        self._pointObjectSizeAction = pointObjectSize
+
+        # Vertex size widget (polygon/rectangle vertices)
+        vertexSize = QtWidgets.QWidgetAction(self)
+        vertexSizeBoxLayout = QtWidgets.QVBoxLayout()
+        vertexSizeLabel = QtWidgets.QLabel(self.tr("頂点の大きさ"))
+        vertexSizeLabel.setAlignment(Qt.AlignCenter)
+        vertexSizeBoxLayout.addWidget(vertexSizeLabel)
+        vertexSizeBoxLayout.addWidget(self.vertexSizeWidget)
+        vertexSize.setDefaultWidget(QtWidgets.QWidget())
+        vertexSize.defaultWidget().setLayout(vertexSizeBoxLayout)
+        self._vertexSizeAction = vertexSize
 
         # Custom cursor checkbox widget
         customCursor = QtWidgets.QWidgetAction(self)
@@ -995,6 +1119,19 @@ class MainWindow(QtWidgets.QMainWindow):
         darkPixelMagnet.defaultWidget().setLayout(darkPixelMagnetBoxLayout)
         darkPixelMagnet.setVisible(False)
         self._darkPixelMagnetAction = darkPixelMagnet
+
+        autoFit = QtWidgets.QWidgetAction(self)
+        autoFitBoxLayout = QtWidgets.QVBoxLayout()
+        autoFitLabel = QtWidgets.QLabel(self.tr("矩形移動時\n自動フィット"))
+        autoFitLabel.setAlignment(Qt.AlignCenter)
+        autoFitBoxLayout.addWidget(autoFitLabel)
+        autoFitBoxLayout.addWidget(
+            self.autoFitCheckbox, alignment=Qt.AlignCenter
+        )
+        autoFit.setDefaultWidget(QtWidgets.QWidget())
+        autoFit.defaultWidget().setLayout(autoFitBoxLayout)
+        autoFit.setVisible(False)
+        self._autoFitAction = autoFit
 
         self.zoomWidget.setWhatsThis(
             str(
@@ -1147,7 +1284,6 @@ class MainWindow(QtWidgets.QMainWindow):
             deleteFile=deleteFile,
             exportFileList=exportFileList,
             progressStats=progressStats,
-            toggleKeepPrevMode=toggle_keep_prev_mode,
             toggle_keep_prev_brightness_contrast=action(
                 text=self.tr("Keep Previous Brightness/Contrast"),
                 slot=lambda: self._config.__setitem__(
@@ -1196,9 +1332,20 @@ class MainWindow(QtWidgets.QMainWindow):
             showTextBounding=showTextBounding,
             showLineFit=showLineFit,
             showDarkPixelMagnet=showDarkPixelMagnet,
+            showAutoFit=showAutoFit,
+            showLineOpacity=showLineOpacity,
+            showPointOpacity=showPointOpacity,
+            showFillOpacity=showFillOpacity,
+            showLineWidth=showLineWidth,
+            showPointObjectSize=showPointObjectSize,
+            showVertexSize=showVertexSize,
+            showRemoveHighIouShapes=showRemoveHighIouShapes,
+            showCopyFromSpecifiedJson=showCopyFromSpecifiedJson,
+            showCopyFromPrevJson=showCopyFromPrevJson,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
-            autoFit=autoFit,
+            removeHighIouShapes=removeHighIouShapes,
+            copyFromSpecifiedJson=copyFromSpecifiedJson,
             copyFromPrevJson=copyFromPrevJson,
         )
         self.on_shapes_present_actions = (saveAs, hideAll, showAll, toggleAll)
@@ -1254,23 +1401,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # XXX: need to add some actions here to activate the shortcut
         self.edit_menu_actions = (
             edit,
-            duplicate,
             copy,
             paste,
-            delete,
             None,
-            undo,
             undoLastPoint,
             None,
             removePoint,
-            None,
-            toggle_keep_prev_mode,
-            None,
-            autoFit,
-            None,
-            removeHighIouShapes,
-            copyFromSpecifiedJson,
-            copyFromPrevJson,
         )
 
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)
@@ -1337,12 +1473,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 showCreateLineStrip,
                 showCreateAiPolygon,
                 showCreateAiMask,
+                None,
                 showRedo,
+                showRemoveHighIouShapes,
+                showCopyFromSpecifiedJson,
+                showCopyFromPrevJson,
+                None,
+                showLineOpacity,
+                showPointOpacity,
+                showFillOpacity,
+                showLineWidth,
+                showPointObjectSize,
+                showVertexSize,
                 None,
                 showLineFit,
                 showParallelLineDist,
                 showTextBounding,
                 showDarkPixelMagnet,
+                showAutoFit,
             ),
         )
 
@@ -1395,6 +1543,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     delete,
                     undo,
                     redo,
+                    removeHighIouShapes,
+                    copyFromSpecifiedJson,
+                    copyFromPrevJson,
                     None,
                     fitWindow,
                     zoom,
@@ -1402,6 +1553,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     pointOpacity,
                     fillOpacity,
                     lineWidth,
+                    pointObjectSize,
+                    vertexSize,
+                    None,
                     customCursor,
                     rightClickEdit,
                     skipDeleteConfirm,
@@ -1410,6 +1564,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     parallelLineDist,
                     textBounding,
                     darkPixelMagnet,
+                    autoFit,
                     None,
                     selectAiModel,
                     None,
@@ -1504,10 +1659,34 @@ class MainWindow(QtWidgets.QMainWindow):
         pointOpacity = self.settings.value("canvas/pointOpacity", 50, type=int)
         fillOpacity = self.settings.value("canvas/fillOpacity", 80, type=int)
         lineWidth = self.settings.value("canvas/lineWidth", 6, type=int)
+        pointObjectSize = self.settings.value(
+            "canvas/pointObjectSize", 24, type=int
+        )
+        vertexSize = self.settings.value("canvas/vertexSize", 8, type=int)
         self.lineOpacityWidget.setValue(lineOpacity)
         self.pointOpacityWidget.setValue(pointOpacity)
         self.fillOpacityWidget.setValue(fillOpacity)
         self.lineWidthWidget.setValue(lineWidth)
+        self.pointObjectSizeWidget.setValue(pointObjectSize)
+        self.vertexSizeWidget.setValue(vertexSize)
+        # Visibility of adjustment widgets (default visible).
+        for key, action_, toggle in (
+            ("view/showLineOpacity", "showLineOpacity",
+             self._toggle_line_opacity_visible),
+            ("view/showPointOpacity", "showPointOpacity",
+             self._toggle_point_opacity_visible),
+            ("view/showFillOpacity", "showFillOpacity",
+             self._toggle_fill_opacity_visible),
+            ("view/showLineWidth", "showLineWidth",
+             self._toggle_line_width_visible),
+            ("view/showPointObjectSize", "showPointObjectSize",
+             self._toggle_point_object_size_visible),
+            ("view/showVertexSize", "showVertexSize",
+             self._toggle_vertex_size_visible),
+        ):
+            visible = self.settings.value(key, True, type=bool)
+            getattr(self.actions, action_).setChecked(visible)
+            toggle(visible)
         customCursorEnabled = self.settings.value(
             "canvas/customCursor", False, type=bool
         )
@@ -1542,6 +1721,17 @@ class MainWindow(QtWidgets.QMainWindow):
         showRedoEnabled = self.settings.value("view/showRedo", False, type=bool)
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
+        for key, action_, toggle in (
+            ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes",
+             self._toggle_remove_high_iou_visible),
+            ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson",
+             self._toggle_copy_from_specified_json_visible),
+            ("view/showCopyFromPrevJson", "showCopyFromPrevJson",
+             self._toggle_copy_from_prev_json_visible),
+        ):
+            visible = self.settings.value(key, True, type=bool)
+            getattr(self.actions, action_).setChecked(visible)
+            toggle(visible)
         showParallelLineDistEnabled = self.settings.value(
             "view/showParallelLineDist", False, type=bool
         )
@@ -1582,10 +1772,15 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.actions.showDarkPixelMagnet.setChecked(showDarkPixelMagnetEnabled)
         self._toggle_dark_pixel_magnet_visible(showDarkPixelMagnetEnabled)
-        autoFitEnabled = self.settings.value("edit/autoFit", False, type=bool)
-        self.actions.autoFit.setChecked(autoFitEnabled)
-        if hasattr(self, "canvas") and self.canvas is not None:
-            self.canvas.setAutoFitEnabled(autoFitEnabled)
+        autoFitEnabled = self.settings.value(
+            "canvas/autoFit", False, type=bool
+        )
+        self.autoFitCheckbox.setChecked(autoFitEnabled)
+        showAutoFitEnabled = self.settings.value(
+            "view/showAutoFit", False, type=bool
+        )
+        self.actions.showAutoFit.setChecked(showAutoFitEnabled)
+        self._toggle_auto_fit_visible(showAutoFitEnabled)
 
         if filename:
             if osp.isdir(filename):
@@ -2228,8 +2423,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for shape in self.canvas.selectedShapes:
             shape.selected = True
             item = self.labelList.findItemByShape(shape)
-            self.labelList.selectItem(item)
-            self.labelList.scrollToItem(item)
+            if item is not None:
+                self.labelList.selectItem(item)
+                self.labelList.scrollToItem(item)
         self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
         self.canvas.sortShapesByArea()
         n_selected = len(selected_shapes)
@@ -2273,10 +2469,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList._model.insertRow(insert_row, label_list_item)
 
         if self.uniqLabelList.find_label_item(shape.label) is None:
+            # Insert first with placeholder color, then update with correct
+            # index-based color (sorted insert may shift the final index)
             self.uniqLabelList.add_label_item(
-                label=shape.label, color=self._get_rgb_by_label(label=shape.label),
+                label=shape.label, color=(0, 255, 0),
                 sorted_insert=True,
             )
+            # Now the label has its final index — update stored color
+            item = self.uniqLabelList.find_label_item(shape.label)
+            if item is not None:
+                rgb = self._get_rgb_by_label(label=shape.label)
+                item.setData(Qt.UserRole + 1, rgb)
+                idx = self.uniqLabelList.get_label_index(shape.label)
+                if idx is not None:
+                    self.uniqLabelList._update_item_text(item, idx)
         self.labelDialog.addLabelHistory(shape.label)
         for action in self.on_shapes_present_actions:
             action.setEnabled(True)
@@ -2359,9 +2565,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
 
     def remLabels(self, shapes):
-        for shape in shapes:
-            item = self.labelList.findItemByShape(shape)
-            self.labelList.removeItem(item)
+        # Removing rows from LabelList also triggers model-level signals used for
+        # drag/drop reordering. During explicit delete, suppress those signals so
+        # we don't treat deletion as a reorder and push duplicate undo snapshots.
+        blocker = QtCore.QSignalBlocker(self.labelList.model())
+        try:
+            for shape in shapes:
+                item = self.labelList.findItemByShape(shape)
+                if item is not None:
+                    self.labelList.removeItem(item)
+        finally:
+            del blocker
 
     def _load_shapes(self, shapes: list[Shape], replace: bool = True) -> None:
         self.labelList.itemSelectionChanged.disconnect(self._label_selection_changed)
@@ -2481,7 +2695,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._current_file_row >= 0:
                 item = self.fileListWidget.item(self._current_file_row)
                 if item:
+                    path = item.data(Qt.UserRole) or item.text()
+                    try:
+                        self._file_mtimes[path] = osp.getmtime(filename)
+                    except OSError:
+                        pass
                     self._setFileItemAnnotated(item, True, saved_in_session=True)
+                    self._refresh_file_list_colors()
             # disable allows next and previous image to proceed
             # self.filename = filename
             return True
@@ -2824,8 +3044,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setScroll(orientation, value)
 
     def setScroll(self, orientation, value):
-        self.scrollBars[orientation].setValue(int(value))
-        self.scroll_values[orientation][self.filename] = value
+        bar = self.scrollBars[orientation]
+        bar.setValue(int(value))
+        if self.filename is not None:
+            # Persist the value actually applied after Qt range clamping.
+            self.scroll_values[orientation][self.filename] = bar.value()
         self._updateNavigatorViewport()
 
     def _set_zoom(self, value: int, pos: QtCore.QPointF | None = None) -> None:
@@ -2835,7 +3058,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if pos is None:
             pos = QtCore.QPointF(self.canvas.visibleRegion().boundingRect().center())
-        canvas_width_old: int = self.canvas.width()
+        # Capture pre-zoom canvas mapping. We must record cursor → image
+        # coordinates and the cursor's viewport-relative position BEFORE the
+        # canvas resizes, because (1) offsetToCenter() can change
+        # discontinuously when the 1.167x drag buffer toggles or when the
+        # canvas transitions between viewport-fitted and image-fitted sizes,
+        # and (2) Qt may clamp scroll bar values during the resize, making
+        # post-resize scroll reads unreliable.
+        scale_old: float = self.canvas.scale
+        offset_old: QtCore.QPointF = self.canvas.offsetToCenter()
+        scroll_x_old: int = self.scrollBars[Qt.Horizontal].value()
+        scroll_y_old: int = self.scrollBars[Qt.Vertical].value()
+        image_x: float = pos.x() / scale_old - offset_old.x()
+        image_y: float = pos.y() / scale_old - offset_old.y()
+        viewport_cursor_x: float = pos.x() - scroll_x_old
+        viewport_cursor_y: float = pos.y() - scroll_y_old
 
         self.actions.fitWidth.setChecked(self._zoom_mode == _ZoomMode.FIT_WIDTH)
         self.actions.fitWindow.setChecked(self._zoom_mode == _ZoomMode.FIT_WINDOW)
@@ -2845,20 +3082,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoomWidget.setValue(value)  # triggers self._paint_canvas
         self._zoom_values[self.filename] = (self._zoom_mode, value)
 
-        canvas_width_new: int = self.canvas.width()
-        if canvas_width_old == canvas_width_new:
+        scale_new: float = self.canvas.scale
+        offset_new: QtCore.QPointF = self.canvas.offsetToCenter()
+        new_canvas_x: float = (image_x + offset_new.x()) * scale_new
+        new_canvas_y: float = (image_y + offset_new.y()) * scale_new
+        # Absolute scroll values keep the same image point under the cursor.
+        new_scroll_x: float = new_canvas_x - viewport_cursor_x
+        new_scroll_y: float = new_canvas_y - viewport_cursor_y
+
+        h_bar = self.scrollBars[Qt.Horizontal]
+        v_bar = self.scrollBars[Qt.Vertical]
+        can_scroll_x = h_bar.maximum() > h_bar.minimum()
+        can_scroll_y = v_bar.maximum() > v_bar.minimum()
+
+        # In low-zoom center-lock mode, both ranges are zero; cursor anchoring
+        # cannot be represented via scroll values, so skip adjustment.
+        if not can_scroll_x and not can_scroll_y:
             return
-        canvas_scale_factor = canvas_width_new / canvas_width_old
-        x_shift: float = pos.x() * canvas_scale_factor - pos.x()
-        y_shift: float = pos.y() * canvas_scale_factor - pos.y()
-        self.setScroll(
-            Qt.Horizontal,
-            self.scrollBars[Qt.Horizontal].value() + x_shift,
-        )
-        self.setScroll(
-            Qt.Vertical,
-            self.scrollBars[Qt.Vertical].value() + y_shift,
-        )
+
+        if can_scroll_x:
+            self.setScroll(Qt.Horizontal, new_scroll_x)
+        if can_scroll_y:
+            self.setScroll(Qt.Vertical, new_scroll_y)
 
     def _set_zoom_to_original(self):
         self._zoom_mode = _ZoomMode.MANUAL_ZOOM
@@ -2866,6 +3111,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _add_zoom(self, increment: float, pos: QtCore.QPointF | None = None) -> None:
         """Zoom to the next/previous predefined zoom level."""
+        if pos is None:
+            cursor_pos = self.canvas.mapFromGlobal(QtGui.QCursor.pos())
+            if self.canvas.rect().contains(cursor_pos):
+                pos = QtCore.QPointF(cursor_pos)
         current = self.zoomWidget.value()
         if increment > 1:
             # Zoom in: find the next larger level
@@ -3150,11 +3399,70 @@ class MainWindow(QtWidgets.QMainWindow):
             if toolbar_action is not None:
                 toolbar_action.setVisible(checked)
 
+    def _toggle_toolbar_button_visible(self, action, checked: bool) -> None:
+        """Toggle visibility of a toolbar button without affecting menu QAction."""
+        if hasattr(self, "_tools_toolbar"):
+            buttons = getattr(self._tools_toolbar, "_action_buttons", {})
+            toolbar_action = buttons.get(action)
+            if toolbar_action is not None:
+                toolbar_action.setVisible(checked)
+
+    def _toggle_remove_high_iou_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.removeHighIouShapes, checked
+        )
+
+    def _toggle_copy_from_specified_json_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.copyFromSpecifiedJson, checked
+        )
+
+    def _toggle_copy_from_prev_json_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.copyFromPrevJson, checked
+        )
+
     def _line_width_changed(self, value: int) -> None:
         """Update line width for all shapes."""
         Shape.PEN_WIDTH = value
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.update()
+
+    def _point_object_size_changed(self, value: int) -> None:
+        """Update size for point shape_type objects only."""
+        Shape.point_object_size = value
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.update()
+
+    def _vertex_size_changed(self, value: int) -> None:
+        """Update vertex size for polygon/rectangle vertices."""
+        Shape.point_size = value
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.update()
+
+    def _toggle_line_opacity_visible(self, checked: bool) -> None:
+        if hasattr(self, "_lineOpacityAction"):
+            self._lineOpacityAction.setVisible(checked)
+
+    def _toggle_point_opacity_visible(self, checked: bool) -> None:
+        if hasattr(self, "_pointOpacityAction"):
+            self._pointOpacityAction.setVisible(checked)
+
+    def _toggle_fill_opacity_visible(self, checked: bool) -> None:
+        if hasattr(self, "_fillOpacityAction"):
+            self._fillOpacityAction.setVisible(checked)
+
+    def _toggle_line_width_visible(self, checked: bool) -> None:
+        if hasattr(self, "_lineWidthAction"):
+            self._lineWidthAction.setVisible(checked)
+
+    def _toggle_point_object_size_visible(self, checked: bool) -> None:
+        if hasattr(self, "_pointObjectSizeAction"):
+            self._pointObjectSizeAction.setVisible(checked)
+
+    def _toggle_vertex_size_visible(self, checked: bool) -> None:
+        if hasattr(self, "_vertexSizeAction"):
+            self._vertexSizeAction.setVisible(checked)
 
     def _custom_cursor_toggled(self, checked: bool) -> None:
         if hasattr(self, "canvas") and self.canvas is not None:
@@ -3167,6 +3475,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _auto_fit_toggled(self, checked: bool) -> None:
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.setAutoFitEnabled(checked)
+
+    def _toggle_auto_fit_visible(self, checked: bool) -> None:
+        if hasattr(self, "_autoFitAction"):
+            self._autoFitAction.setVisible(checked)
 
     def setFitWindow(self, value=True):
         if value:
@@ -3240,13 +3552,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fileListWidget.repaint()
             return
 
-        prev_shapes: list[Shape] = (
-            self.canvas.shapes
-            if self._config["keep_prev"]
-            or QtWidgets.QApplication.keyboardModifiers()
-            == (Qt.ControlModifier | Qt.ShiftModifier)
-            else []
-        )
+        prev_shapes: list[Shape] = []
         self.resetState()
         self.canvas.setEnabled(False)
         if filename is None:
@@ -3345,6 +3651,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._vertex_opacity_changed(self.pointOpacityWidget.value())
         self._fill_opacity_changed(self.fillOpacityWidget.value())
         self._line_width_changed(self.lineWidthWidget.value())
+        self._point_object_size_changed(self.pointObjectSizeWidget.value())
+        self._vertex_size_changed(self.vertexSizeWidget.value())
         self._paint_canvas()
         self.addRecentFile(self.filename)
         self.toggleActions(True)
@@ -3413,6 +3721,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("canvas/fillOpacity", self.fillOpacityWidget.value())
         self.settings.setValue("canvas/lineWidth", self.lineWidthWidget.value())
         self.settings.setValue(
+            "canvas/pointObjectSize", self.pointObjectSizeWidget.value()
+        )
+        self.settings.setValue(
+            "canvas/vertexSize", self.vertexSizeWidget.value()
+        )
+        for key, action_ in (
+            ("view/showLineOpacity", "showLineOpacity"),
+            ("view/showPointOpacity", "showPointOpacity"),
+            ("view/showFillOpacity", "showFillOpacity"),
+            ("view/showLineWidth", "showLineWidth"),
+            ("view/showPointObjectSize", "showPointObjectSize"),
+            ("view/showVertexSize", "showVertexSize"),
+        ):
+            self.settings.setValue(
+                key, getattr(self.actions, action_).isChecked()
+            )
+        self.settings.setValue(
             "canvas/customCursor", self.customCursorCheckbox.isChecked()
         )
         self.settings.setValue(
@@ -3455,6 +3780,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "view/showRedo", self.actions.showRedo.isChecked()
         )
+        for key, action_ in (
+            ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes"),
+            ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson"),
+            ("view/showCopyFromPrevJson", "showCopyFromPrevJson"),
+        ):
+            self.settings.setValue(
+                key, getattr(self.actions, action_).isChecked()
+            )
         self.settings.setValue(
             "view/showParallelLineDist",
             self.actions.showParallelLineDist.isChecked(),
@@ -3484,8 +3817,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.showDarkPixelMagnet.isChecked(),
         )
         self.settings.setValue(
-            "edit/autoFit",
-            self.actions.autoFit.isChecked(),
+            "canvas/autoFit",
+            self.autoFitCheckbox.isChecked(),
+        )
+        self.settings.setValue(
+            "view/showAutoFit",
+            self.actions.showAutoFit.isChecked(),
         )
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
@@ -3692,22 +4029,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return label_file
 
+    def _compute_alpha_for_mtime(self, mtime: float) -> int:
+        """Map mtime to alpha (FILE_ALPHA_MIN..FILE_ALPHA_MAX) using cached range."""
+        rng = self._file_mtime_range
+        if rng is None:
+            return self.FILE_ALPHA_MAX
+        min_mt, max_mt = rng
+        if max_mt <= min_mt:
+            return self.FILE_ALPHA_MAX
+        t = (mtime - min_mt) / (max_mt - min_mt)
+        t = max(0.0, min(1.0, t))
+        return int(round(self.FILE_ALPHA_MIN + t * (self.FILE_ALPHA_MAX - self.FILE_ALPHA_MIN)))
+
+    def _refresh_file_list_colors(self) -> None:
+        """Recompute mtime range and re-apply gradient backgrounds to all items."""
+        if not self._file_mtimes:
+            self._file_mtime_range = None
+        else:
+            mts = self._file_mtimes.values()
+            self._file_mtime_range = (min(mts), max(mts))
+        r, g, b = self.FILE_COLOR_RGB
+        self.fileListWidget.setUpdatesEnabled(False)
+        try:
+            for i in range(self.fileListWidget.count()):
+                item = self.fileListWidget.item(i)
+                if item is None:
+                    continue
+                path = item.data(Qt.UserRole) or item.text()
+                mtime = self._file_mtimes.get(path)
+                if mtime is None:
+                    item.setBackground(QtGui.QBrush())
+                else:
+                    alpha = self._compute_alpha_for_mtime(mtime)
+                    item.setBackground(QtGui.QColor(r, g, b, alpha))
+        finally:
+            self.fileListWidget.setUpdatesEnabled(True)
+
     def _setFileItemAnnotated(
         self, item: QtWidgets.QListWidgetItem, annotated: bool, saved_in_session: bool = False
     ) -> None:
         """Set file list item check state and background color.
 
-        Args:
-            item: The list widget item to update
-            annotated: Whether the file has annotations
-            saved_in_session: If True, use darker blue (alpha 40) for files saved in this session
+        Background uses an mtime-based gradient (oldest=alpha10, newest=alpha60)
+        when the file's mtime is in the cache. Falls back to the legacy max-alpha
+        color when mtime is not yet known. ``saved_in_session`` is kept for API
+        compatibility but no longer affects the rendering — mtime drives color.
         """
         if annotated:
             item.setCheckState(Qt.Checked)
-            if saved_in_session:
+            path = item.data(Qt.UserRole) or item.text()
+            mtime = self._file_mtimes.get(path)
+            if mtime is None:
                 item.setBackground(self.FILE_NEWLY_SAVED_COLOR)
             else:
-                item.setBackground(self.FILE_ANNOTATED_COLOR)
+                alpha = self._compute_alpha_for_mtime(mtime)
+                r, g, b = self.FILE_COLOR_RGB
+                item.setBackground(QtGui.QColor(r, g, b, alpha))
         else:
             item.setCheckState(Qt.Unchecked)
             item.setBackground(QtGui.QBrush())  # Clear background
@@ -3728,7 +4105,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
             item = self.fileListWidget.currentItem()
             if item:
+                path = item.data(Qt.UserRole) or item.text()
+                self._file_mtimes.pop(path, None)
                 self._setFileItemAnnotated(item, False)
+                self._refresh_file_list_colors()
 
             self.resetState()
 
@@ -4139,9 +4519,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def currentPath(self):
         return osp.dirname(str(self.filename)) if self.filename else "."
 
-    def toggleKeepPrevMode(self):
-        self._config["keep_prev"] = not self._config["keep_prev"]
-
     def removeSelectedPoint(self):
         shape = self.canvas.prevhShape
         if (
@@ -4258,9 +4635,15 @@ class MainWindow(QtWidgets.QMainWindow):
             is_annotated = (
                 QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
             )
+            if is_annotated:
+                try:
+                    self._file_mtimes[file] = osp.getmtime(label_file)
+                except OSError:
+                    pass
             self._setFileItemAnnotated(item, is_annotated)
             self.fileListWidget.addItem(item)
 
+        self._refresh_file_list_colors()
         self._open_next_image()
 
     def _import_images_from_dir(
@@ -4272,18 +4655,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._prev_opened_dir = root_dir
         self._initially_annotated_files = set()  # Reset when opening new directory
+        self._file_mtimes = {}
+        self._file_mtime_range = None
         self.filename = None
         self.fileListWidget.clear()
+        self.uniqLabelList.clear()
 
         filenames = _scan_image_files(root_dir=root_dir)
+        if pattern:
+            try:
+                filenames = [f for f in filenames if re.search(pattern, f)]
+            except re.error:
+                pass
 
-        # Collect all labels from JSON files and assign colors in sorted order
+        # Show a progress dialog for large directories (heavy JSON scanning).
+        progress: QtWidgets.QProgressDialog | None = None
+        total = len(filenames)
+        if total > 100:
+            progress = QtWidgets.QProgressDialog(
+                self.tr("画像ファイルを読み込み中..."),
+                None,  # no cancel button
+                0,
+                total * 2,  # phase 1: label scan, phase 2: item add
+                self,
+            )
+            progress.setWindowTitle(self.tr("読み込み中"))
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(300)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            progress.setValue(0)
+
+        # Phase 1: Collect labels from JSONs AND populate mtime cache in one pass.
         all_labels: set[str] = set()
-        for filename in filenames:
+        for idx, filename in enumerate(filenames):
             label_file = f"{osp.splitext(filename)[0]}.json"
             if self.output_dir:
                 label_file = osp.join(self.output_dir, osp.basename(label_file))
             if osp.exists(label_file):
+                try:
+                    self._file_mtimes[filename] = osp.getmtime(label_file)
+                except OSError:
+                    pass
                 try:
                     with open(label_file, encoding="utf-8") as f:
                         data = json.load(f)
@@ -4292,38 +4705,60 @@ class MainWindow(QtWidgets.QMainWindow):
                             all_labels.add(shape["label"])
                 except Exception:
                     pass
-        # Add all labels to uniqLabelList in sorted order for consistent colors
+            if progress is not None and (idx & 0x1F) == 0:
+                progress.setValue(idx)
+                QtWidgets.QApplication.processEvents()
+        # Add all labels to uniqLabelList in sorted order for consistent colors.
+        # Insert all first, then assign colors — so index-based color lookup
+        # sees the final sorted positions.
         for label in sorted(all_labels):
             if self.uniqLabelList.find_label_item(label) is None:
                 self.uniqLabelList.add_label_item(
                     label=label,
-                    color=self._get_rgb_by_label(label=label),
+                    color=(0, 255, 0),
                     sorted_insert=True,
                 )
-        if pattern:
-            try:
-                filenames = [f for f in filenames if re.search(pattern, f)]
-            except re.error:
-                pass
-        for filename in filenames:
-            label_file = f"{osp.splitext(filename)[0]}.json"
-            if self.output_dir:
-                label_file_without_path = osp.basename(label_file)
-                label_file = osp.join(self.output_dir, label_file_without_path)
-            # Display as {dir_name}/{file_name}
-            dir_name = osp.basename(root_dir) if root_dir else ""
-            file_name = osp.basename(filename)
-            display_name = f"{dir_name}/{file_name}" if dir_name else file_name
-            item = QtWidgets.QListWidgetItem(display_name)
-            item.setData(Qt.UserRole, filename)  # Store full path
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            is_annotated = (
-                QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file)
-            )
-            if is_annotated:
-                self._initially_annotated_files.add(filename)
-            self._setFileItemAnnotated(item, is_annotated)
-            self.fileListWidget.addItem(item)
+        for row in range(self.uniqLabelList.count()):
+            item = self.uniqLabelList.item(row)
+            if item:
+                label = item.data(Qt.UserRole)
+                rgb = self._get_rgb_by_label(label=label)
+                item.setData(Qt.UserRole + 1, rgb)
+                self.uniqLabelList._update_item_text(item, row)
+        # Compute mtime range now so per-item coloring during add uses gradient.
+        if self._file_mtimes:
+            mts = self._file_mtimes.values()
+            self._file_mtime_range = (min(mts), max(mts))
+        # Phase 2: Add list widget items.
+        self.fileListWidget.setUpdatesEnabled(False)
+        try:
+            for idx, filename in enumerate(filenames):
+                label_file = f"{osp.splitext(filename)[0]}.json"
+                if self.output_dir:
+                    label_file_without_path = osp.basename(label_file)
+                    label_file = osp.join(self.output_dir, label_file_without_path)
+                # Display as {dir_name}/{file_name}
+                dir_name = osp.basename(root_dir) if root_dir else ""
+                file_name = osp.basename(filename)
+                display_name = f"{dir_name}/{file_name}" if dir_name else file_name
+                item = QtWidgets.QListWidgetItem(display_name)
+                item.setData(Qt.UserRole, filename)  # Store full path
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                is_annotated = (
+                    QtCore.QFile.exists(label_file)
+                    and LabelFile.is_label_file(label_file)
+                )
+                if is_annotated:
+                    self._initially_annotated_files.add(filename)
+                self._setFileItemAnnotated(item, is_annotated)
+                self.fileListWidget.addItem(item)
+                if progress is not None and (idx & 0x1F) == 0:
+                    progress.setValue(total + idx)
+                    QtWidgets.QApplication.processEvents()
+        finally:
+            self.fileListWidget.setUpdatesEnabled(True)
+        if progress is not None:
+            progress.setValue(total * 2)
 
         # Enable export when files are loaded
         self.actions.exportFileList.setEnabled(self.fileListWidget.count() > 0)

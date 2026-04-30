@@ -351,10 +351,20 @@ class Canvas(QtWidgets.QWidget):
         self._mw_dialog: _MagicWandPanel | None = None
         self._mw_range_w: int | None = None
         self._mw_range_h: int | None = None
+        # Accumulated clicks for multi-click union selection.
+        # Each entry: {"pos": QPointF, "rgb": list[int],
+        #              "tolerances": list[int], "range_w": int|None,
+        #              "range_h": int|None, "frozen_mask": np.ndarray|None}
+        # Only the last click is "working" (frozen_mask=None, live flood fill
+        # controlled by the panel). All earlier clicks are frozen snapshots
+        # and never recomputed.
+        self._mw_clicks: list[dict] = []
         self._auto_fit_guides: list[tuple[int, float]] = []
         self._auto_fit_dots: list[tuple[float, float]] = []
         self._auto_fit_count: int = 0
-        self._auto_fit_snap_targets: dict[int, float] = {}  # edge→abs coord
+        # edge → (source, abs coord); source is "line_fit" or "text_bounding".
+        # Only line_fit entries get rendered as red dashed lines.
+        self._auto_fit_snap_targets: dict[int, tuple[str, float]] = {}
         self._auto_fit_last_detect_pos: QPointF | None = None
         self._lf_snap_cache: tuple | None = None
         self._lf_snap_entered = False
@@ -719,6 +729,7 @@ class Canvas(QtWidgets.QWidget):
                 self._mw_active = False
                 self._mw_contour = None
                 self._mw_image = None
+                self._mw_clicks = []
                 self._close_mw_panel()
             self.repaint()  # clear crosshair
         else:
@@ -755,10 +766,12 @@ class Canvas(QtWidgets.QWidget):
             if self._mw_active and self.current:
                 r, g, b = self._mw_base_rgb
                 tr, tg, tb = self._mw_tolerances
+                n_clicks = len(self._mw_clicks)
                 messages.append(
-                    self.tr("魔法の杖: RGB(%d,%d,%d) ±(%d,%d,%d)") % (r, g, b, tr, tg, tb)
+                    self.tr("魔法の杖[%d]: RGB(%d,%d,%d) ±(%d,%d,%d)")
+                    % (n_clicks, r, g, b, tr, tg, tb)
                 )
-                messages.append(self.tr("↑↓で±調整"))
+                messages.append(self.tr("左クリックで追加 / 右クリックで戻す"))
                 messages.append(self.tr("Enter確定 / ESCキャンセル"))
             else:
                 messages.append(self.tr("Creating %r") % self.createMode)
@@ -974,6 +987,7 @@ class Canvas(QtWidgets.QWidget):
                 if (
                     self._auto_fit_enabled
                     and self.hShape
+                    and self.hShape.shape_type == "rectangle"
                     and not is_shift_pressed
                 ):
                     # Re-detect when cursor moved ≥ tolerance from last detection
@@ -1138,6 +1152,23 @@ class Canvas(QtWidgets.QWidget):
         pos: QPointF = self.transformPos(a0.localPos())
 
         is_shift_pressed = a0.modifiers() & Qt.ShiftModifier
+
+        # Magic wand: right-click undoes the most recent click
+        if a0.button() == Qt.RightButton and self._mw_active:
+            self._magic_wand_undo_click()
+            return
+
+        # Magic wand: left-click while active appends another click.
+        # Must intercept before the generic "add point to existing shape"
+        # branch, which would otherwise fall through with self.current set.
+        if (
+            a0.button() == Qt.LeftButton
+            and self._mw_active
+            and self.createMode == "magic_wand"
+            and not self.outOfPixmap(pos)
+        ):
+            self._magic_wand_select(pos)
+            return
 
         if a0.button() == Qt.LeftButton:
             if self.drawing():
@@ -1666,7 +1697,8 @@ class Canvas(QtWidgets.QWidget):
     def _autoFitDetect(self, shape):
         """Detect auto-fit snap positions for all edges (preview only, no shape change).
 
-        Returns list of (edge_index, snap_pos) and sets visual feedback variables.
+        Returns list of (edge_index, snap_pos, source) and sets visual feedback
+        variables. `source` is "line_fit" or "text_bounding".
         """
         self._auto_fit_guides = []
         self._auto_fit_dots = []
@@ -1676,7 +1708,7 @@ class Canvas(QtWidgets.QWidget):
             return []
         if self._grayscale_cache is None:
             return []
-        pending = []  # [(edge_index, snap_pos), ...]
+        pending = []  # [(edge_index, snap_pos, source), ...]
 
         for edge_index in (
             Shape.EDGE_TOP, Shape.EDGE_BOTTOM,
@@ -1711,7 +1743,7 @@ class Canvas(QtWidgets.QWidget):
                         rule, shape, edge_index, pos
                     )
                     if result is not None:
-                        pending.append((edge_index, result[0]))
+                        pending.append((edge_index, result[0], "line_fit"))
                         self._auto_fit_guides.append(
                             (edge_index, result[1])
                         )
@@ -1729,7 +1761,9 @@ class Canvas(QtWidgets.QWidget):
                         rule, i, shape, edge_index, pos
                     )
                     if result is not None:
-                        pending.append((edge_index, result[0]))
+                        pending.append(
+                            (edge_index, result[0], "text_bounding")
+                        )
                         if result[1]:
                             self._auto_fit_dots.extend(result[1])
                         snap_found = True
@@ -1753,15 +1787,20 @@ class Canvas(QtWidgets.QWidget):
         pending = self._autoFitDetect(shape)
         if not merge:
             self._auto_fit_snap_targets.clear()
-        for edge_index, snap_pos in pending:
+        for edge_index, snap_pos, source in pending:
             if edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
-                self._auto_fit_snap_targets[edge_index] = snap_pos.y()
+                coord = snap_pos.y()
             else:
-                self._auto_fit_snap_targets[edge_index] = snap_pos.x()
+                coord = snap_pos.x()
+            self._auto_fit_snap_targets[edge_index] = (source, coord)
 
-        # Rebuild guides from all targets (including merged ones)
+        # Rebuild guides from line_fit-source targets only. text_bounding
+        # entries are intentionally excluded so that the red dashed line
+        # never appears unless the line-fit checkbox is on.
         self._auto_fit_guides = [
-            (ei, coord) for ei, coord in self._auto_fit_snap_targets.items()
+            (ei, coord)
+            for ei, (src, coord) in self._auto_fit_snap_targets.items()
+            if src == "line_fit"
         ]
         self._auto_fit_count = len(self._auto_fit_snap_targets)
 
@@ -1771,7 +1810,7 @@ class Canvas(QtWidgets.QWidget):
 
         if not self._auto_fit_snap_targets:
             return
-        for edge_idx, target in self._auto_fit_snap_targets.items():
+        for edge_idx, (_src, target) in self._auto_fit_snap_targets.items():
             if edge_idx in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
                 shape.moveEdgeTo(edge_idx, QPointF(0, target))
             else:
@@ -3228,13 +3267,18 @@ class Canvas(QtWidgets.QWidget):
         ):
             self._drawHoverLabel(p, self.hShape)
 
-        # Draw dot at magic wand click position (same green as shape/cursor)
-        if self._mw_active and self._mw_click_pos is not None:
-            dot_x = self._mw_click_pos.x() * self.scale
-            dot_y = self._mw_click_pos.y() * self.scale
+        # Draw dots at every magic wand click position
+        # (same green as shape/cursor); latest click is drawn slightly larger
+        if self._mw_active and self._mw_clicks:
             p.setPen(Qt.NoPen)
             p.setBrush(QtGui.QBrush(QtGui.QColor(0, 255, 0, 255)))
-            p.drawEllipse(QPointF(dot_x, dot_y), 4.0, 4.0)
+            last_index = len(self._mw_clicks) - 1
+            for i, click in enumerate(self._mw_clicks):
+                cpos = click["pos"]
+                dot_x = cpos.x() * self.scale
+                dot_y = cpos.y() * self.scale
+                r = 5.0 if i == last_index else 3.5
+                p.drawEllipse(QPointF(dot_x, dot_y), r, r)
 
         if not self.current or self.createMode not in [
             "polygon",
@@ -3355,7 +3399,12 @@ class Canvas(QtWidgets.QWidget):
         return not (0 <= p.x() <= w - 1 and 0 <= p.y() <= h - 1)
 
     def _magic_wand_select(self, pos):
-        """Start interactive magic wand selection."""
+        """Start interactive magic wand selection or append a click."""
+        # Subsequent click while active → union with existing selection
+        if self._mw_active and self._mw_image is not None:
+            self._magic_wand_add_click(pos)
+            return
+
         image = labelme.utils.img_qt_to_arr(self.pixmap.toImage())
         if image.ndim == 2:
             image = np.stack([image] * 3, axis=-1)
@@ -3373,6 +3422,14 @@ class Canvas(QtWidgets.QWidget):
         self._mw_base_rgb = image[iy, ix].tolist()
         self._mw_range_w = None
         self._mw_range_h = None
+        self._mw_clicks = [{
+            "pos": pos,
+            "rgb": list(self._mw_base_rgb),
+            "tolerances": list(self._mw_tolerances),
+            "range_w": None,
+            "range_h": None,
+            "frozen_mask": None,
+        }]
         self._mw_active = True
         # Create floating panel first so _magic_wand_update can set range
         if self._mw_dialog is not None:
@@ -3392,21 +3449,84 @@ class Canvas(QtWidgets.QWidget):
         self._mw_dialog.focusDefault()
         self._position_mw_panel()
 
-    def _magic_wand_update(self):
-        """Re-run flood fill with current tolerance and update preview."""
-        pos = self._mw_click_pos
+    def _magic_wand_add_click(self, pos):
+        """Append a click to the current magic wand selection."""
         image = self._mw_image
+        if image is None:
+            return
         h, w = image.shape[:2]
         ix, iy = int(pos.x()), int(pos.y())
-        tolerances = self._mw_tolerances
+        if not (0 <= ix < w and 0 <= iy < h):
+            return
+        # Freeze the current working click before starting a new one
+        self._freeze_last_click()
+        new_rgb = image[iy, ix].tolist()
+        new_click = {
+            "pos": pos,
+            "rgb": list(new_rgb),
+            "tolerances": list(self._mw_tolerances),
+            "range_w": None,
+            "range_h": None,
+            "frozen_mask": None,
+        }
+        self._mw_clicks.append(new_click)
+        self._mw_click_pos = pos
+        self._mw_base_rgb = list(new_rgb)
+        self._mw_range_w = None
+        self._mw_range_h = None
+        if self._mw_dialog is not None:
+            self._mw_dialog.setValues(
+                self._mw_base_rgb[0], self._mw_base_rgb[1],
+                self._mw_base_rgb[2],
+                self._mw_tolerances[0], self._mw_tolerances[1],
+                self._mw_tolerances[2],
+            )
+        self._magic_wand_update()
+        self._position_mw_panel()
+        self._update_status()
 
-        # Phase 1: Flood fill (C-level BFS, FIXED_RANGE)
-        # Each pixel is compared to the seed pixel (base_rgb), not its neighbor.
-        # This prevents gradient creep (e.g. dark→white through gradual change).
+    def _magic_wand_undo_click(self):
+        """Remove the most recent click. Cancel if this was the last one."""
+        if not self._mw_active:
+            return
+        if len(self._mw_clicks) <= 1:
+            self._magic_wand_cancel()
+            return
+        self._mw_clicks.pop()
+        last = self._mw_clicks[-1]
+        # Un-freeze the now-last click so the panel can edit it again
+        last["frozen_mask"] = None
+        self._mw_click_pos = last["pos"]
+        self._mw_base_rgb = list(last["rgb"])
+        self._mw_tolerances = list(last["tolerances"])
+        self._mw_range_w = last["range_w"]
+        self._mw_range_h = last["range_h"]
+        if self._mw_dialog is not None:
+            self._mw_dialog.setValues(
+                self._mw_base_rgb[0], self._mw_base_rgb[1],
+                self._mw_base_rgb[2],
+                self._mw_tolerances[0], self._mw_tolerances[1],
+                self._mw_tolerances[2],
+            )
+        self._magic_wand_update()
+        self._position_mw_panel()
+        self._update_status()
+
+    def _compute_click_mask(self, click: dict) -> np.ndarray | None:
+        """Flood fill a single click and return its binary mask (uint8 0/1)."""
+        image = self._mw_image
+        if image is None:
+            return None
+        h, w = image.shape[:2]
+        cpos = click["pos"]
+        cix, ciy = int(cpos.x()), int(cpos.y())
+        if not (0 <= cix < w and 0 <= ciy < h):
+            return None
+        c_tol = click["tolerances"]
         img_work = image.copy()
-        img_work[iy, ix] = self._mw_base_rgb
+        img_work[ciy, cix] = click["rgb"]
         flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-        lo_diff = (int(tolerances[0]), int(tolerances[1]), int(tolerances[2]))
+        lo_diff = (int(c_tol[0]), int(c_tol[1]), int(c_tol[2]))
         up_diff = lo_diff
         flags = (
             8
@@ -3414,34 +3534,88 @@ class Canvas(QtWidgets.QWidget):
             | cv2.FLOODFILL_FIXED_RANGE
             | (255 << 8)
         )
-        cv2.floodFill(img_work, flood_mask, (ix, iy), 0, lo_diff, up_diff, flags)
+        cv2.floodFill(
+            img_work, flood_mask, (cix, ciy), 0, lo_diff, up_diff, flags,
+        )
         filled = flood_mask[1:-1, 1:-1] > 0
+        if click["range_w"] is not None or click["range_h"] is not None:
+            rw = click["range_w"] if click["range_w"] is not None else w
+            rh = click["range_h"] if click["range_h"] is not None else h
+            rect_mask = np.zeros((h, w), dtype=bool)
+            y0 = max(0, ciy - rh)
+            y1 = min(h, ciy + rh + 1)
+            x0 = max(0, cix - rw)
+            x1 = min(w, cix + rw + 1)
+            rect_mask[y0:y1, x0:x1] = True
+            filled = filled & rect_mask
+        return filled.astype(np.uint8)
 
-        if not np.any(filled):
+    def _freeze_last_click(self) -> None:
+        """Commit the working (last) click's mask as a frozen snapshot."""
+        if not self._mw_clicks:
+            return
+        last = self._mw_clicks[-1]
+        if last.get("frozen_mask") is not None:
+            return
+        # Sync panel state back to the working click before freezing
+        last["rgb"] = list(self._mw_base_rgb)
+        last["tolerances"] = list(self._mw_tolerances)
+        last["range_w"] = self._mw_range_w
+        last["range_h"] = self._mw_range_h
+        mask = self._compute_click_mask(last)
+        if mask is None:
+            image = self._mw_image
+            if image is None:
+                return
+            h, w = image.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+        last["frozen_mask"] = mask
+
+    def _magic_wand_update(self):
+        """Update preview: frozen masks + live flood fill for working click.
+
+        All clicks except the most recent hold a frozen mask that is never
+        recomputed. Panel parameter changes only affect the working click.
+        The resulting contour is the connected component that contains the
+        working click; if none contains it, the largest is used.
+        """
+        if not self._mw_clicks:
+            return
+        image = self._mw_image
+        if image is None:
+            return
+        h, w = image.shape[:2]
+
+        # Mirror panel state back onto the working click
+        last = self._mw_clicks[-1]
+        if last.get("frozen_mask") is None:
+            last["rgb"] = list(self._mw_base_rgb)
+            last["tolerances"] = list(self._mw_tolerances)
+            last["range_w"] = self._mw_range_w
+            last["range_h"] = self._mw_range_h
+
+        # Accumulate: frozen snapshots + live flood fill for the working click
+        accum = np.zeros((h, w), dtype=np.uint8)
+        for click in self._mw_clicks:
+            fm = click.get("frozen_mask")
+            if fm is not None:
+                accum |= fm
+            else:
+                live = self._compute_click_mask(click)
+                if live is not None:
+                    accum |= live
+
+        if not np.any(accum):
             self._mw_contour = None
             self.current = None
             self.update()
             return
 
-        filled_u8 = filled.astype(np.uint8)
-
-        # Apply rectangular range limit from click point
-        if self._mw_range_w is not None or self._mw_range_h is not None:
-            rw = self._mw_range_w if self._mw_range_w is not None else w
-            rh = self._mw_range_h if self._mw_range_h is not None else h
-            rect_mask = np.zeros((h, w), dtype=np.uint8)
-            y0 = max(0, iy - rh)
-            y1 = min(h, iy + rh + 1)
-            x0 = max(0, ix - rw)
-            x1 = min(w, ix + rw + 1)
-            rect_mask[y0:y1, x0:x1] = 1
-            filled_u8 = filled_u8 & rect_mask
-
         # Contour extraction with 0.2px sub-pixel precision
         # Upscale mask 5x, extract contour, scale back to get 1/5 = 0.2px steps
         scale = 5
         mask_up = cv2.resize(
-            filled_u8, (w * scale, h * scale),
+            accum, (w * scale, h * scale),
             interpolation=cv2.INTER_NEAREST,
         )
         contours_up, _ = cv2.findContours(
@@ -3452,15 +3626,29 @@ class Canvas(QtWidgets.QWidget):
             self.current = None
             self.update()
             return
-        contour_up = max(contours_up, key=cv2.contourArea)
+
+        # Prefer the component containing the latest click; fall back to largest
+        latest_pos = self._mw_clicks[-1]["pos"]
+        lx_up = float(latest_pos.x()) * scale
+        ly_up = float(latest_pos.y()) * scale
+        chosen = None
+        for c in contours_up:
+            if cv2.pointPolygonTest(c, (lx_up, ly_up), False) >= 0:
+                if chosen is None or cv2.contourArea(c) > cv2.contourArea(chosen):
+                    chosen = c
+        if chosen is None:
+            chosen = max(contours_up, key=cv2.contourArea)
+        contour_up = chosen
         # Scale contour back to original coordinates (float)
         contour = (contour_up.astype(np.float64) / scale).astype(np.float32)
         self._mw_contour = contour
 
-        # Compute bounding box half-widths from click point
+        # Compute bounding box half-widths from latest click
+        ix_last = int(latest_pos.x())
+        iy_last = int(latest_pos.y())
         bx, by, bw, bh = cv2.boundingRect(contour)
-        half_w = max(abs(bx - ix), abs(bx + bw - ix))
-        half_h = max(abs(by - iy), abs(by + bh - iy))
+        half_w = max(abs(bx - ix_last), abs(bx + bw - ix_last))
+        half_h = max(abs(by - iy_last), abs(by + bh - iy_last))
         if self._mw_dialog is not None:
             self._mw_dialog.setRange(half_w, half_h)
 
@@ -3535,6 +3723,7 @@ class Canvas(QtWidgets.QWidget):
         self._mw_active = False
         self._mw_contour = None
         self._mw_image = None
+        self._mw_clicks = []
         self._close_mw_panel()
         self.current = None
         self.drawingPolygon.emit(False)
@@ -3568,6 +3757,7 @@ class Canvas(QtWidgets.QWidget):
         self._mw_active = False
         self._mw_contour = None
         self._mw_image = None
+        self._mw_clicks = []
         self._close_mw_panel()
         self.finalise()
 

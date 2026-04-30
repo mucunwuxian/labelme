@@ -53,6 +53,9 @@ class Shape:
 
     point_type = P_ROUND
     point_size = 8
+    # Size for point shape_type objects only (not polygon/rectangle vertices).
+    # Highlighted/selected point objects use point_object_size * 1.5.
+    point_object_size = 24
     scale = 1.0
 
     _current_vertex_fill_color: QtGui.QColor
@@ -347,10 +350,10 @@ class Shape:
         # Point shapes use larger size for better visibility
         if self.shape_type == "point":
             if self.selected or i == self._highlightIndex:
-                d = 36  # Larger square when selected/highlighted
+                d = self.point_object_size * 1.5  # selected/highlighted
                 shape = self.P_SQUARE
             else:
-                d = 24  # Normal size
+                d = self.point_object_size
         elif i == self._highlightIndex:
             # Apply highlight size multiplier only for non-point shapes
             size, shape = self._highlightSettings[self._highlightMode]
@@ -518,7 +521,11 @@ class Shape:
         min_i = None
         # For point shapes, use visual size for hit detection
         if self.shape_type == "point":
-            visual_size = 36 if self.selected else 24
+            visual_size = (
+                self.point_object_size * 1.5
+                if self.selected
+                else self.point_object_size
+            )
             epsilon = max(epsilon, visual_size / 2)
         point = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
         for i, p in enumerate(self.points):
