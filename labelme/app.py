@@ -1790,6 +1790,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._load_file(filename=filename)
         else:
             self.filename = None
+            # First launch (or stale prev dir): prompt the user to pick a folder
+            # once the main window has been shown.
+            if not (self._prev_opened_dir and osp.exists(self._prev_opened_dir)):
+                QtCore.QTimer.singleShot(0, self._open_dir_with_dialog)
 
         # Populate the File menu dynamically.
         self.updateFileMenu()
@@ -4597,6 +4601,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 | QtWidgets.QFileDialog.DontResolveSymlinks,
             )
         )
+        if not targetDirPath:
+            return
         self._import_images_from_dir(root_dir=targetDirPath)
         self._open_next_image()
 
