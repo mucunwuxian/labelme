@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import datetime
 import enum
@@ -346,6 +347,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vertexSizeWidget.setSuffix(" px")
         self.vertexSizeWidget.valueChanged.connect(self._vertex_size_changed)
         self.vertexSizeWidget.setValue(8)
+
+        self.storeImageDataCheckbox = QtWidgets.QCheckBox()
+        self.storeImageDataCheckbox.toggled.connect(self._store_image_data_toggled)
 
         self.customCursorCheckbox = QtWidgets.QCheckBox()
         self.customCursorCheckbox.toggled.connect(self._custom_cursor_toggled)
@@ -745,6 +749,28 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             enabled=False,
         )
+        addBase64ToAllJsons = action(
+            self.tr("全JSONに\n画像データ追加"),
+            self.addBase64ToAllJsons,
+            None,
+            "image-add-all.svg",
+            self.tr(
+                "ファイル一覧の全画像に対応するJSONを開き、"
+                "base64の画像データを書き込む"
+            ),
+            enabled=False,
+        )
+        removeBase64FromAllJsons = action(
+            self.tr("全JSONから\n画像データ削除"),
+            self.removeBase64FromAllJsons,
+            None,
+            "image-remove-all.svg",
+            self.tr(
+                "ファイル一覧の全画像に対応するJSONを開き、"
+                "base64の画像データを削除する"
+            ),
+            enabled=False,
+        )
         showAutoFit = action(
             self.tr("矩形移動時に自動フィットを表示"),
             self._toggle_auto_fit_visible,
@@ -883,6 +909,18 @@ class MainWindow(QtWidgets.QMainWindow):
             checkable=True,
             checked=True,
         )
+        showAddBase64ToAllJsons = action(
+            self.tr("全JSONに画像データ追加ボタンを表示"),
+            self._toggle_add_base64_to_all_jsons_visible,
+            checkable=True,
+            checked=False,
+        )
+        showRemoveBase64FromAllJsons = action(
+            self.tr("全JSONから画像データ削除ボタンを表示"),
+            self._toggle_remove_base64_from_all_jsons_visible,
+            checkable=True,
+            checked=False,
+        )
 
         showParallelLineDist = action(
             self.tr("平行直線との距離調整を表示"),
@@ -894,6 +932,13 @@ class MainWindow(QtWidgets.QMainWindow):
         showTextBounding = action(
             self.tr("文字外接調整を表示"),
             self._toggle_text_bounding_visible,
+            checkable=True,
+            checked=False,
+        )
+
+        showStoreImageData = action(
+            self.tr("JSONに画像データ保存を表示"),
+            self._toggle_store_image_data_visible,
             checkable=True,
             checked=False,
         )
@@ -1018,6 +1063,20 @@ class MainWindow(QtWidgets.QMainWindow):
         vertexSize.setDefaultWidget(QtWidgets.QWidget())
         vertexSize.defaultWidget().setLayout(vertexSizeBoxLayout)
         self._vertexSizeAction = vertexSize
+
+        # Save image data (base64) in JSON checkbox widget
+        storeImageData = QtWidgets.QWidgetAction(self)
+        storeImageDataBoxLayout = QtWidgets.QVBoxLayout()
+        storeImageDataLabel = QtWidgets.QLabel(self.tr("JSONに\n画像データ保存"))
+        storeImageDataLabel.setAlignment(Qt.AlignCenter)
+        storeImageDataBoxLayout.addWidget(storeImageDataLabel)
+        storeImageDataBoxLayout.addWidget(
+            self.storeImageDataCheckbox, alignment=Qt.AlignCenter
+        )
+        storeImageData.setDefaultWidget(QtWidgets.QWidget())
+        storeImageData.defaultWidget().setLayout(storeImageDataBoxLayout)
+        storeImageData.setVisible(False)
+        self._storeImageDataAction = storeImageData
 
         # Custom cursor checkbox widget
         customCursor = QtWidgets.QWidgetAction(self)
@@ -1328,6 +1387,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showCreateAiMask=showCreateAiMask,
             showCreateMagicWand=showCreateMagicWand,
             showRedo=showRedo,
+            showStoreImageData=showStoreImageData,
             showParallelLineDist=showParallelLineDist,
             showTextBounding=showTextBounding,
             showLineFit=showLineFit,
@@ -1342,11 +1402,15 @@ class MainWindow(QtWidgets.QMainWindow):
             showRemoveHighIouShapes=showRemoveHighIouShapes,
             showCopyFromSpecifiedJson=showCopyFromSpecifiedJson,
             showCopyFromPrevJson=showCopyFromPrevJson,
+            showAddBase64ToAllJsons=showAddBase64ToAllJsons,
+            showRemoveBase64FromAllJsons=showRemoveBase64FromAllJsons,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
             removeHighIouShapes=removeHighIouShapes,
             copyFromSpecifiedJson=copyFromSpecifiedJson,
             copyFromPrevJson=copyFromPrevJson,
+            addBase64ToAllJsons=addBase64ToAllJsons,
+            removeBase64FromAllJsons=removeBase64FromAllJsons,
         )
         self.on_shapes_present_actions = (saveAs, hideAll, showAll, toggleAll)
 
@@ -1387,6 +1451,8 @@ class MainWindow(QtWidgets.QMainWindow):
             removeHighIouShapes,
             copyFromSpecifiedJson,
             copyFromPrevJson,
+            addBase64ToAllJsons,
+            removeBase64FromAllJsons,
         )
         # menu shown at right click
         self.context_menu_actions = (
@@ -1478,6 +1544,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 showRemoveHighIouShapes,
                 showCopyFromSpecifiedJson,
                 showCopyFromPrevJson,
+                showAddBase64ToAllJsons,
+                showRemoveBase64FromAllJsons,
                 None,
                 showLineOpacity,
                 showPointOpacity,
@@ -1486,6 +1554,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 showPointObjectSize,
                 showVertexSize,
                 None,
+                showStoreImageData,
                 showLineFit,
                 showParallelLineDist,
                 showTextBounding,
@@ -1546,6 +1615,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     removeHighIouShapes,
                     copyFromSpecifiedJson,
                     copyFromPrevJson,
+                    addBase64ToAllJsons,
+                    removeBase64FromAllJsons,
                     None,
                     fitWindow,
                     zoom,
@@ -1560,6 +1631,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     rightClickEdit,
                     skipDeleteConfirm,
                     skipSaveNameConfirm,
+                    storeImageData,
                     lineFit,
                     parallelLineDist,
                     textBounding,
@@ -1687,6 +1759,20 @@ class MainWindow(QtWidgets.QMainWindow):
             visible = self.settings.value(key, True, type=bool)
             getattr(self.actions, action_).setChecked(visible)
             toggle(visible)
+        storeImageDataEnabled = self.settings.value(
+            "canvas/storeImageData", self._config["store_data"], type=bool
+        )
+        self.storeImageDataCheckbox.blockSignals(True)
+        self.storeImageDataCheckbox.setChecked(storeImageDataEnabled)
+        self.storeImageDataCheckbox.blockSignals(False)
+        self._config["store_data"] = bool(storeImageDataEnabled)
+        self.actions.saveWithImageData.setChecked(bool(storeImageDataEnabled))
+        showStoreImageDataEnabled = self.settings.value(
+            "view/showStoreImageData", False, type=bool
+        )
+        self.actions.showStoreImageData.setChecked(showStoreImageDataEnabled)
+        self._toggle_store_image_data_visible(showStoreImageDataEnabled)
+
         customCursorEnabled = self.settings.value(
             "canvas/customCursor", False, type=bool
         )
@@ -1721,15 +1807,19 @@ class MainWindow(QtWidgets.QMainWindow):
         showRedoEnabled = self.settings.value("view/showRedo", False, type=bool)
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
-        for key, action_, toggle in (
+        for key, action_, toggle, default_visible in (
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes",
-             self._toggle_remove_high_iou_visible),
+             self._toggle_remove_high_iou_visible, True),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson",
-             self._toggle_copy_from_specified_json_visible),
+             self._toggle_copy_from_specified_json_visible, True),
             ("view/showCopyFromPrevJson", "showCopyFromPrevJson",
-             self._toggle_copy_from_prev_json_visible),
+             self._toggle_copy_from_prev_json_visible, True),
+            ("view/showAddBase64ToAllJsons", "showAddBase64ToAllJsons",
+             self._toggle_add_base64_to_all_jsons_visible, False),
+            ("view/showRemoveBase64FromAllJsons", "showRemoveBase64FromAllJsons",
+             self._toggle_remove_base64_from_all_jsons_visible, False),
         ):
-            visible = self.settings.value(key, True, type=bool)
+            visible = self.settings.value(key, default_visible, type=bool)
             getattr(self.actions, action_).setChecked(visible)
             toggle(visible)
         showParallelLineDistEnabled = self.settings.value(
@@ -2788,6 +2878,144 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setDirty()
         return True
 
+    def addBase64ToAllJsons(self) -> None:
+        """Iterate over all image entries in the file list and write base64
+        image data into each corresponding JSON.
+        """
+        if not self.imageList:
+            return
+        mb = QtWidgets.QMessageBox
+        msg = self.tr(
+            "ファイル一覧の全画像に対応するJSONを開き、\n"
+            "base64の画像データを書き込みます。\n"
+            "（既に書かれている場合は上書きされます）\n\n"
+            "本当に実施しますか？"
+        )
+        answer = mb.question(
+            self,
+            self.tr("確認"),
+            msg,
+            mb.Yes | mb.No,
+            mb.No,
+        )
+        if answer != mb.Yes:
+            return
+        self._batch_update_jsons_image_data(add=True)
+
+    def removeBase64FromAllJsons(self) -> None:
+        """Iterate over all image entries in the file list and clear the
+        base64 image data from each corresponding JSON.
+        """
+        if not self.imageList:
+            return
+        mb = QtWidgets.QMessageBox
+        msg = self.tr(
+            "ファイル一覧の全画像に対応するJSONを開き、\n"
+            "base64の画像データを削除します。\n\n"
+            "本当に実施しますか？"
+        )
+        answer = mb.question(
+            self,
+            self.tr("確認"),
+            msg,
+            mb.Yes | mb.No,
+            mb.No,
+        )
+        if answer != mb.Yes:
+            return
+        self._batch_update_jsons_image_data(add=False)
+
+    def _batch_update_jsons_image_data(self, add: bool) -> None:
+        image_paths = self.imageList
+        total = len(image_paths)
+        title = (
+            self.tr("全JSONに画像データ追加")
+            if add
+            else self.tr("全JSONから画像データ削除")
+        )
+        progress = QtWidgets.QProgressDialog(
+            self.tr("JSON更新中..."),
+            self.tr("キャンセル"),
+            0,
+            total,
+            self,
+        )
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(300)
+
+        updated = 0
+        unchanged = 0
+        skipped = 0
+        errors: list[str] = []
+        # output_dir 利用時、複数の画像が同じ basename を持つと同一 JSON に
+        # 衝突するため、処理済み label_file を覚えて重複処理を防ぐ。
+        processed_label_files: set[str] = set()
+        for idx, img_path in enumerate(image_paths):
+            if progress.wasCanceled():
+                break
+            if (idx & 0x7) == 0:
+                progress.setValue(idx)
+                QtWidgets.QApplication.processEvents()
+            label_file = f"{osp.splitext(img_path)[0]}.json"
+            if self.output_dir:
+                label_file = osp.join(
+                    self.output_dir, osp.basename(label_file)
+                )
+            if label_file in processed_label_files:
+                skipped += 1
+                continue
+            processed_label_files.add(label_file)
+            if not osp.exists(label_file):
+                skipped += 1
+                continue
+            try:
+                with open(label_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if add:
+                    if not osp.exists(img_path):
+                        skipped += 1
+                        continue
+                    image_bytes = LabelFile.load_image_file(img_path)
+                    if image_bytes is None:
+                        skipped += 1
+                        continue
+                    new_value = base64.b64encode(image_bytes).decode("utf-8")
+                    if data.get("imageData") == new_value:
+                        unchanged += 1
+                        continue
+                    data["imageData"] = new_value
+                else:
+                    if data.get("imageData") is None:
+                        unchanged += 1
+                        continue
+                    data["imageData"] = None
+                with open(label_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                try:
+                    self._file_mtimes[img_path] = osp.getmtime(label_file)
+                except OSError:
+                    pass
+                updated += 1
+            except Exception as e:
+                errors.append(f"{osp.basename(label_file)}: {e}")
+        progress.setValue(total)
+        self._refresh_file_list_colors()
+        summary = self.tr(
+            "更新: {}件 / 変更なし: {}件 / スキップ: {}件 / エラー: {}件"
+        ).format(updated, unchanged, skipped, len(errors))
+        if errors:
+            details = "\n".join(errors[:20])
+            if len(errors) > 20:
+                details += "\n..."
+            QtWidgets.QMessageBox.warning(
+                self,
+                title,
+                f"{summary}\n\n{details}",
+            )
+        else:
+            QtWidgets.QMessageBox.information(self, title, summary)
+
     def removeHighIouShapes(self):
         """Remove duplicate shapes whose IoU exceeds 0.9, keeping the older one."""
         shapes = self.canvas.shapes
@@ -3426,6 +3654,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.copyFromPrevJson, checked
         )
 
+    def _toggle_add_base64_to_all_jsons_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.addBase64ToAllJsons, checked
+        )
+
+    def _toggle_remove_base64_from_all_jsons_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.removeBase64FromAllJsons, checked
+        )
+
     def _line_width_changed(self, value: int) -> None:
         """Update line width for all shapes."""
         Shape.PEN_WIDTH = value
@@ -3467,6 +3705,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_vertex_size_visible(self, checked: bool) -> None:
         if hasattr(self, "_vertexSizeAction"):
             self._vertexSizeAction.setVisible(checked)
+
+    def _store_image_data_toggled(self, checked: bool) -> None:
+        self._config["store_data"] = bool(checked)
+        if hasattr(self, "actions") and hasattr(self.actions, "saveWithImageData"):
+            self.actions.saveWithImageData.setChecked(bool(checked))
+
+    def _toggle_store_image_data_visible(self, checked: bool) -> None:
+        if hasattr(self, "_storeImageDataAction"):
+            self._storeImageDataAction.setVisible(checked)
 
     def _custom_cursor_toggled(self, checked: bool) -> None:
         if hasattr(self, "canvas") and self.canvas is not None:
@@ -3708,6 +3955,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def enableSaveImageWithData(self, enabled):
         self._config["store_data"] = enabled
         self.actions.saveWithImageData.setChecked(enabled)
+        if hasattr(self, "storeImageDataCheckbox"):
+            self.storeImageDataCheckbox.blockSignals(True)
+            self.storeImageDataCheckbox.setChecked(enabled)
+            self.storeImageDataCheckbox.blockSignals(False)
 
     def closeEvent(self, a0: QtGui.QCloseEvent) -> None:
         if not self._can_continue():
@@ -3741,6 +3992,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.setValue(
                 key, getattr(self.actions, action_).isChecked()
             )
+        self.settings.setValue(
+            "canvas/storeImageData", self.storeImageDataCheckbox.isChecked()
+        )
+        self.settings.setValue(
+            "view/showStoreImageData",
+            self.actions.showStoreImageData.isChecked(),
+        )
         self.settings.setValue(
             "canvas/customCursor", self.customCursorCheckbox.isChecked()
         )
@@ -3788,6 +4046,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes"),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson"),
             ("view/showCopyFromPrevJson", "showCopyFromPrevJson"),
+            ("view/showAddBase64ToAllJsons", "showAddBase64ToAllJsons"),
+            ("view/showRemoveBase64FromAllJsons", "showRemoveBase64FromAllJsons"),
         ):
             self.settings.setValue(
                 key, getattr(self.actions, action_).isChecked()
