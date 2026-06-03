@@ -555,14 +555,17 @@ class Shape:
     def containsPoint(self, point) -> bool:
         if self.shape_type in ["line", "linestrip", "points"]:
             return False
+        if not self.points:
+            return False
         if self.shape_type == "point":
             # For point shapes, check if the click is within the point's visual radius
-            # Use actual display size: 36 when selected, 24 otherwise
-            if self.points:
-                dist = labelme.utils.distance(self.points[0] - point)
-                visual_size = 36 if self.selected else 24
-                return dist <= visual_size / 2 / self.scale
-            return False
+            dist = labelme.utils.distance(self.points[0] - point)
+            visual_size = (
+                self.point_object_size * 1.5
+                if self.selected
+                else self.point_object_size
+            )
+            return dist <= visual_size / 2 / self.scale
         if self.mask is not None:
             y = np.clip(
                 int(round(point.y() - self.points[0].y())),
@@ -588,6 +591,8 @@ class Shape:
                 raidus = labelme.utils.distance(self.points[0] - self.points[1])
                 path.addEllipse(self.points[0], raidus, raidus)
         else:
+            if not self.points:
+                return QtGui.QPainterPath()
             path = QtGui.QPainterPath(self.points[0])
             for p in self.points[1:]:
                 path.lineTo(p)
