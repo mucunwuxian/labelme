@@ -180,7 +180,7 @@ class LabelFile:
             flags = data.get("flags") or {}
             imagePath = data["imagePath"]
             self._check_image_height_and_width(
-                base64.b64encode(imageData).decode("utf-8"),
+                imageData,
                 data.get("imageHeight"),
                 data.get("imageWidth"),
             )
@@ -204,20 +204,24 @@ class LabelFile:
         self.otherData = otherData
 
     @staticmethod
-    def _check_image_height_and_width(imageData, imageHeight, imageWidth):
-        img_arr = utils.img_b64_to_arr(imageData)
-        if imageHeight is not None and img_arr.shape[0] != imageHeight:
+    def _check_image_height_and_width(imageData: bytes, imageHeight, imageWidth):
+        # PIL.Image.open reads only the header here, so width/height come
+        # without decoding pixels. Values are identical to the previous
+        # np.array(img).shape[1]/shape[0] (no EXIF orientation in either path).
+        with PIL.Image.open(io.BytesIO(imageData)) as img:
+            width, height = img.size
+        if imageHeight is not None and height != imageHeight:
             logger.error(
                 "imageHeight does not match with imageData or imagePath, "
                 "so getting imageHeight from actual image."
             )
-            imageHeight = img_arr.shape[0]
-        if imageWidth is not None and img_arr.shape[1] != imageWidth:
+            imageHeight = height
+        if imageWidth is not None and width != imageWidth:
             logger.error(
                 "imageWidth does not match with imageData or imagePath, "
                 "so getting imageWidth from actual image."
             )
-            imageWidth = img_arr.shape[1]
+            imageWidth = width
         return imageHeight, imageWidth
 
     def save(
@@ -232,10 +236,10 @@ class LabelFile:
         flags=None,
     ):
         if imageData is not None:
-            imageData = base64.b64encode(imageData).decode("utf-8")
             imageHeight, imageWidth = self._check_image_height_and_width(
                 imageData, imageHeight, imageWidth
             )
+            imageData = base64.b64encode(imageData).decode("utf-8")
         if otherData is None:
             otherData = {}
         if flags is None:

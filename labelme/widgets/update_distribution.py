@@ -40,7 +40,10 @@ class UpdateDistributionWidget(QtWidgets.QWidget):
 
     def setViewportRect(self, x_ratio: float, y_ratio: float, w_ratio: float, h_ratio: float):
         """Set the viewport rectangle in ratio coordinates (0-1)."""
-        self._viewport_rect = QtCore.QRectF(x_ratio, y_ratio, w_ratio, h_ratio)
+        rect = QtCore.QRectF(x_ratio, y_ratio, w_ratio, h_ratio)
+        if self._viewport_rect is not None and rect == self._viewport_rect:
+            return
+        self._viewport_rect = rect
         self.update()
 
     def resizeEvent(self, event):

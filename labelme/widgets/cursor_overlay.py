@@ -21,6 +21,10 @@ class CursorOverlayWidget(QtWidgets.QWidget):
         self._show_point_circle = False
         self._crosshair_color = QtGui.QColor(0, 255, 0, 128)
         self._point_circle_color = QtGui.QColor(0, 255, 0, 128)
+        # Region occupied by the currently painted decorations (for
+        # region-limited invalidation; a full-widget update on this
+        # translucent child forces a full repaint of the canvas beneath).
+        self._last_rect = QtCore.QRect()
 
         # Pre-render Gaussian gradient
         self._gradient_pixmap = self._create_gradient_pixmap()
@@ -44,37 +48,68 @@ class CursorOverlayWidget(QtWidgets.QWidget):
         painter.end()
         return pixmap
 
+    # Covers every painted decoration around the cursor: gradient radius 40,
+    # crosshair arms 30 (pen 1), point circle radius 20 with pen width 5 —
+    # plus margin for antialiasing and float→int rounding.
+    _DECORATION_RADIUS = 48
+
+    def _decorationRect(self, pos) -> QtCore.QRect:
+        r = self._DECORATION_RADIUS
+        return QtCore.QRect(int(pos.x()) - r, int(pos.y()) - r, 2 * r + 1, 2 * r + 1)
+
+    def _invalidate(self):
+        """Invalidate only the region the decorations occupy (old + new)."""
+        new_rect = QtCore.QRect()
+        if self._cursor_pos is not None and (
+            self._show_crosshair or self._show_point_circle
+        ):
+            new_rect = self._decorationRect(self._cursor_pos)
+        dirty = new_rect.united(self._last_rect)
+        self._last_rect = new_rect
+        if not dirty.isNull():
+            self.update(dirty)
+
     def setCursorPos(self, widget_pos):
         """Set cursor position in widget coordinates."""
+        if self._cursor_pos is not None and widget_pos == self._cursor_pos:
+            return
         self._cursor_pos = widget_pos
-        self.update()
+        self._invalidate()
 
     def setShowCrosshair(self, show: bool):
         """Enable/disable crosshair display."""
+        if show == self._show_crosshair:
+            return
         self._show_crosshair = show
-        self.update()
+        self._invalidate()
 
     def setShowPointCircle(self, show: bool):
         """Enable/disable point circle display."""
+        if show == self._show_point_circle:
+            return
         self._show_point_circle = show
-        self.update()
+        self._invalidate()
 
     def setCrosshairColor(self, color: QtGui.QColor):
         """Set crosshair line color."""
+        if color == self._crosshair_color:
+            return
         self._crosshair_color = color
-        self.update()
+        self._invalidate()
 
     def setPointCircleColor(self, color: QtGui.QColor):
         """Set point circle color."""
+        if color == self._point_circle_color:
+            return
         self._point_circle_color = color
-        self.update()
+        self._invalidate()
 
     def hideCursor(self):
         """Hide all cursor graphics."""
         self._show_crosshair = False
         self._show_point_circle = False
         self._cursor_pos = None
-        self.update()
+        self._invalidate()
 
     def paintEvent(self, event):
         if self._cursor_pos is None:

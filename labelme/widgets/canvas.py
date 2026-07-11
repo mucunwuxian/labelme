@@ -721,6 +721,32 @@ class Canvas(QtWidgets.QWidget):
     def editing(self):
         return self.mode == CanvasMode.EDIT
 
+    def cancelDrawing(self):
+        """Cancel any in-progress drawing and clear per-draw transient state.
+
+        Shared by the ESC key and by mode switches so an unfinished shape
+        (or its preview leftovers) never leaks into the next mode.
+        """
+        if self._mw_active:
+            self._magic_wand_cancel()  # restores the cursor itself
+        else:
+            if self.current is not None:
+                self.current = None
+                self.drawingPolygon.emit(False)
+            # Restore even when no shape is in progress: the cursor can be
+            # hidden with current=None (e.g. hidden near the start point,
+            # then the last vertex undone before switching modes).
+            self._unhide_os_cursor()
+            self.restoreCursor()
+        # Transient draw state: clear even when no shape was in progress
+        # (e.g. leftover preview line / DPM ghost after a bare mode switch).
+        self.line.points = []
+        self.line.point_labels = []
+        self._undone_points = []
+        self._dpm_ghost_pos = None
+        self._near_start_point = False
+        self.update()
+
     def setEditing(self, value=True):
         self.mode = CanvasMode.EDIT if value else CanvasMode.CREATE
         if self.mode == CanvasMode.EDIT:
@@ -858,7 +884,9 @@ class Canvas(QtWidgets.QWidget):
             self.prevMovePoint = pos  # Update for crosshair drawing
             self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
             self._updateCursorOverlay()
-            self.repaint()
+            # update() (not repaint()): coalesce to one paint per frame on
+            # 60-120Hz mouse-move streams; rendered frames are identical.
+            self.update()
             self.movingShape = True
             return
 
@@ -887,7 +915,18 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self.overrideCursor(CURSOR_DRAW)
             if not self.current:
-                self._updateCursorOverlay()  # Update cursor overlay (no repaint needed)
+                self._updateCursorOverlay()
+                # Modes whose full-span crosshair is drawn by paintEvent need
+                # a full-canvas repaint per move: the old cross lines used to
+                # be erased as a side effect of the overlay's full-widget
+                # update(), which is now region-limited. (Keeping this a full
+                # update is deliberate — a stale-prone coordinate cache for
+                # strip invalidation was tried and reverted per review.)
+                if (
+                    self._crosshair[self._createMode]
+                    and self._createMode not in ("point", "polygon")
+                ):
+                    self.update()
                 self._update_status()
                 return
             # Magic wand preview: don't follow mouse
@@ -966,6 +1005,9 @@ class Canvas(QtWidgets.QWidget):
                 self.line.close()
             assert len(self.line.points) == len(self.line.point_labels)
             self._updateCursorOverlay()
+            # Must stay repaint() (synchronous): the NEAR_VERTEX highlight set
+            # at the snap-to-start branch above is cleared on the next line,
+            # so it is only visible if painting happens before highlightClear.
             self.repaint()
             self.current.highlightClear()
             self._update_status()
@@ -979,7 +1021,7 @@ class Canvas(QtWidgets.QWidget):
                     self._force_blank_cursor()
                     self.prevMovePoint = pos  # Update for grid line drawing
                 self.boundedMoveEdge(pos)
-                self.repaint()
+                self.update()
                 self.movingShape = True
             elif self.selectedShapes and self.prevPoint is not None:
                 self.overrideCursor(CURSOR_MOVE)
@@ -1004,7 +1046,7 @@ class Canvas(QtWidgets.QWidget):
                     self._auto_fit_snap_targets.clear()
                     self._auto_fit_last_detect_pos = None
                     self._autoFitClearGuides()
-                self.repaint()
+                self.update()
                 self.movingShape = True
             return
 
@@ -1023,7 +1065,13 @@ class Canvas(QtWidgets.QWidget):
             # Look for a nearby vertex to highlight. If that fails,
             # check if we happen to be inside a shape.
             index = shape.nearestVertex(pos, self.epsilon)
-            index_edge = shape.nearestEdge(pos, self.epsilon)
+            # nearestEdge is only consumed by the `elif index_edge ...
+            # and shape.canAddPoint()` branch below, so skip the O(edges)
+            # scan when a vertex already matched or the shape can never
+            # take a new point (both functions are pure reads).
+            index_edge = None
+            if index is None and shape.canAddPoint():
+                index_edge = shape.nearestEdge(pos, self.epsilon)
             if index is not None:
                 if self.hShape and self.hShape is not shape:
                     self.hShape.highlightClear()
@@ -3980,15 +4028,8 @@ class Canvas(QtWidgets.QWidget):
             # Magic wand interactive mode — keys handled by dialog
             if self._mw_active and self.current:
                 return
-            if key == Qt.Key_Escape and self.current:
-                self.current = None
-                self.drawingPolygon.emit(False)
-                # Reset near-start-point flag
-                self._near_start_point = False
-                # Restore cursor when canceling creation
-                self._unhide_os_cursor()
-                self.restoreCursor()
-                self.update()
+            if key == Qt.Key_Escape:
+                self.cancelDrawing()
             elif (
                 key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Space)
                 and self.canCloseShape()

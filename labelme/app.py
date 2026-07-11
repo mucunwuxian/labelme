@@ -722,6 +722,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Paste copied polygons"),
             enabled=False,
         )
+        deleteAllShapes = action(
+            self.tr("ポリゴン\n一括削除"),
+            self.deleteAllShapes,
+            None,
+            "trash-polygon.svg",
+            self.tr("開いている画像のポリゴンを全て削除"),
+            enabled=False,
+        )
         removeHighIouShapes = action(
             self.tr("IoU0.9超の\nポリゴン削除"),
             self.removeHighIouShapes,
@@ -890,6 +898,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._toggle_redo_visible,
             checkable=True,
             checked=False,
+        )
+        showDeleteAllShapes = action(
+            self.tr("ポリゴン一括削除ボタンを表示"),
+            self._toggle_delete_all_shapes_visible,
+            checkable=True,
+            checked=True,
         )
         showRemoveHighIouShapes = action(
             self.tr("IoU0.9超のポリゴン削除ボタンを表示"),
@@ -1399,6 +1413,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showLineWidth=showLineWidth,
             showPointObjectSize=showPointObjectSize,
             showVertexSize=showVertexSize,
+            showDeleteAllShapes=showDeleteAllShapes,
             showRemoveHighIouShapes=showRemoveHighIouShapes,
             showCopyFromSpecifiedJson=showCopyFromSpecifiedJson,
             showCopyFromPrevJson=showCopyFromPrevJson,
@@ -1406,6 +1421,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showRemoveBase64FromAllJsons=showRemoveBase64FromAllJsons,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
+            deleteAllShapes=deleteAllShapes,
             removeHighIouShapes=removeHighIouShapes,
             copyFromSpecifiedJson=copyFromSpecifiedJson,
             copyFromPrevJson=copyFromPrevJson,
@@ -1448,6 +1464,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createAiPolygonMode,
             createAiMaskMode,
             brightnessContrast,
+            deleteAllShapes,
             removeHighIouShapes,
             copyFromSpecifiedJson,
             copyFromPrevJson,
@@ -1541,6 +1558,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 showCreateAiMask,
                 None,
                 showRedo,
+                showDeleteAllShapes,
                 showRemoveHighIouShapes,
                 showCopyFromSpecifiedJson,
                 showCopyFromPrevJson,
@@ -1612,6 +1630,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     delete,
                     undo,
                     redo,
+                    deleteAllShapes,
                     removeHighIouShapes,
                     copyFromSpecifiedJson,
                     copyFromPrevJson,
@@ -1808,6 +1827,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
         for key, action_, toggle, default_visible in (
+            ("view/showDeleteAllShapes", "showDeleteAllShapes",
+             self._toggle_delete_all_shapes_visible, True),
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes",
              self._toggle_remove_high_iou_visible, True),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson",
@@ -2121,6 +2142,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Disable "1つ上のJSON" when on the first file
             if self.fileListWidget.currentRow() <= 0:
                 self.actions.copyFromPrevJson.setEnabled(False)
+            # Re-apply fit-button disabling (zoom_actions were bulk-enabled)
+            self._sync_fit_actions()
 
     def queueEvent(self, function):
         QtCore.QTimer.singleShot(0, function)
@@ -2289,6 +2312,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _switch_canvas_mode(
         self, edit: bool = True, createMode: str | None = None
     ) -> None:
+        # Cancel any in-progress drawing first: an unfinished shape must not
+        # leak into the next mode (leftover polygon preview after switching
+        # to rectangle, stale `current` blocking point-creation clicks, etc.)
+        self.canvas.cancelDrawing()
         self.canvas.setEditing(edit)
         if createMode is not None:
             self.canvas.createMode = createMode
@@ -3027,8 +3054,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return rect.x(), rect.y(), rect.right(), rect.bottom()
 
         def _iou(a, b):
-            ax1, ay1, ax2, ay2 = _bbox(a)
-            bx1, by1, bx2, by2 = _bbox(b)
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
             ix1 = max(ax1, bx1)
             iy1 = max(ay1, by1)
             ix2 = min(ax2, bx2)
@@ -3041,6 +3068,10 @@ class MainWindow(QtWidgets.QMainWindow):
             union = area_a + area_b - inter
             return inter / union if union > 0 else 0.0
 
+        # boundingRect() builds a QPainterPath per call; hoist it out of the
+        # O(n^2) pair loop (shapes are not mutated until after confirmation).
+        bboxes = [_bbox(s) for s in shapes]
+
         to_remove: set[int] = set()
         for i in range(len(shapes)):
             if i in to_remove:
@@ -3048,7 +3079,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for j in range(i + 1, len(shapes)):
                 if j in to_remove:
                     continue
-                if _iou(shapes[i], shapes[j]) > 0.9:
+                if _iou(bboxes[i], bboxes[j]) > 0.9:
                     # Keep the one with modified_at set; if both set, keep newer
                     ts_i = shapes[i].modified_at
                     ts_j = shapes[j].modified_at
@@ -3277,11 +3308,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setScroll(self, orientation, value):
         bar = self.scrollBars[orientation]
+        old_value = bar.value()
         bar.setValue(int(value))
         if self.filename is not None:
             # Persist the value actually applied after Qt range clamping.
             self.scroll_values[orientation][self.filename] = bar.value()
-        self._updateNavigatorViewport()
+        if bar.value() == old_value:
+            # setValue did not fire valueChanged, but other inputs of the
+            # viewport computation may still have changed (e.g. FIT_WIDTH +
+            # height-only window resize keeps zoom and scroll identical while
+            # the viewport height changes), so update explicitly. When the
+            # value did change, valueChanged already triggered this once.
+            self._updateNavigatorViewport()
 
     def _set_zoom(self, value: int, pos: QtCore.QPointF | None = None) -> None:
         if self.filename is None:
@@ -3308,6 +3346,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.actions.fitWidth.setChecked(self._zoom_mode == _ZoomMode.FIT_WIDTH)
         self.actions.fitWindow.setChecked(self._zoom_mode == _ZoomMode.FIT_WINDOW)
+        self._sync_fit_actions()
         self.canvas.enableDragging(
             enabled=value > int(self.scalers[_ZoomMode.FIT_WINDOW]() * 100)
         )
@@ -3639,6 +3678,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if toolbar_action is not None:
                 toolbar_action.setVisible(checked)
 
+    def _toggle_delete_all_shapes_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.deleteAllShapes, checked
+        )
+
     def _toggle_remove_high_iou_visible(self, checked: bool) -> None:
         self._toggle_toolbar_button_visible(
             self.actions.removeHighIouShapes, checked
@@ -3730,6 +3774,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_auto_fit_visible(self, checked: bool) -> None:
         if hasattr(self, "_autoFitAction"):
             self._autoFitAction.setVisible(checked)
+
+    def _sync_fit_actions(self) -> None:
+        """Disable the fit button whose mode is already active.
+
+        Re-clicking a checked fit button would toggle it off and drop the
+        zoom to manual 100%, which surprises users; graying it out instead
+        makes the active mode explicit.
+        """
+        self.actions.fitWindow.setEnabled(self._zoom_mode != _ZoomMode.FIT_WINDOW)
+        self.actions.fitWidth.setEnabled(self._zoom_mode != _ZoomMode.FIT_WIDTH)
 
     def setFitWindow(self, value=True):
         if value:
@@ -4043,6 +4097,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "view/showRedo", self.actions.showRedo.isChecked()
         )
         for key, action_ in (
+            ("view/showDeleteAllShapes", "showDeleteAllShapes"),
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes"),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson"),
             ("view/showCopyFromPrevJson", "showCopyFromPrevJson"),
@@ -4322,10 +4377,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 path = item.data(Qt.UserRole) or item.text()
                 mtime = self._file_mtimes.get(path)
                 if mtime is None:
-                    item.setBackground(QtGui.QBrush())
+                    new_brush = QtGui.QBrush()
                 else:
                     alpha = self._compute_alpha_for_mtime(mtime)
-                    item.setBackground(QtGui.QColor(r, g, b, alpha))
+                    new_brush = QtGui.QBrush(QtGui.QColor(r, g, b, alpha))
+                # QListWidgetItem.setBackground emits dataChanged even for an
+                # equal brush; skip rows whose color is already correct.
+                if item.background() != new_brush:
+                    item.setBackground(new_brush)
         finally:
             self.fileListWidget.setUpdatesEnabled(True)
 
@@ -4820,6 +4879,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.remLabels(self.canvas.deleteSelected())
         self.setDirty()
         # Disable selection-dependent actions since nothing is selected now
+        self.actions.delete.setEnabled(False)
+        self.actions.duplicate.setEnabled(False)
+        self.actions.copy.setEnabled(False)
+        self.actions.edit.setEnabled(False)
+        self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.actions.redo.setEnabled(self.canvas.isShapeRedoable)
+        self._recompute_reference_medians()
+        if self.noShapes():
+            for action in self.on_shapes_present_actions:
+                action.setEnabled(False)
+
+    def deleteAllShapes(self):
+        """Delete all shapes in the currently open image after confirmation."""
+        n_shapes = len(self.canvas.shapes)
+        if n_shapes == 0:
+            return
+        yes, no = QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No
+        msg = self.tr(
+            "開いている画像のポリゴンを全て削除します（{}件）。\n"
+            "本当に実施しますか？"
+        ).format(n_shapes)
+        if yes != QtWidgets.QMessageBox.warning(
+            self, self.tr("確認"), msg, yes | no, no
+        ):
+            return
+        # Assign selection directly: everything is deleted right after, so the
+        # per-shape label-list sync in shapeSelectionChanged (O(n^2) with
+        # scrollToItem repaints) is wasted work on large images.
+        self.canvas.selectedShapes = list(self.canvas.shapes)
+        self.remLabels(self.canvas.deleteSelected())
+        self.setDirty()
         self.actions.delete.setEnabled(False)
         self.actions.duplicate.setEnabled(False)
         self.actions.copy.setEnabled(False)
