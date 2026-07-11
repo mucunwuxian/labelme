@@ -641,6 +641,26 @@ class Canvas(QtWidgets.QWidget):
             return False
         return True
 
+    def _clearStaleHoverState(self):
+        """Drop hover/highlight references to shapes no longer in self.shapes.
+
+        Deletion, undo/redo and load all replace or shrink the shape list;
+        a lingering hShape/prevhShape pointing at a removed shape is painted
+        nowhere but can be resurrected by press/release handlers and then
+        crashes shapes.index() or mutates a dead shape.
+        """
+        if self.hShape is not None and self.hShape not in self.shapes:
+            self.hShape.highlightClear()
+            self.hShape = None
+            self.hVertex = None
+            self.hEdge = None
+            self.hEdgeMidpoint = None
+        if self.prevhShape is not None and self.prevhShape not in self.shapes:
+            self.prevhShape = None
+            self.prevhVertex = None
+            self.prevhEdge = None
+            self.prevhEdgeMidpoint = None
+
     def restoreShape(self):
         # This does _part_ of the job of restoring shapes.
         # The complete process is also done in app.py::undoShapeEdit
@@ -655,6 +675,7 @@ class Canvas(QtWidgets.QWidget):
         shapesBackup = self.shapesBackups.pop()
         self.shapes = shapesBackup
         self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
@@ -666,6 +687,7 @@ class Canvas(QtWidgets.QWidget):
         shapesRedo = self.shapesRedoStack.pop()
         self.shapes = shapesRedo
         self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
@@ -1454,12 +1476,23 @@ class Canvas(QtWidgets.QWidget):
             self._autoFitClearGuides()
             self.repaint()
 
-            index = self.shapes.index(self.hShape)
-            if self.shapesBackups[-1][index].points != self.shapes[index].points:
-                self.hShape.touch()  # Update modification timestamp
-                self.storeShapes()
-                self.shapeMoved.emit()
-
+            # Defensive: hShape must be in shapes (cache coherence), but a
+            # stale hover reference must not crash the app mid-annotation.
+            if self.hShape in self.shapes:
+                index = self.shapes.index(self.hShape)
+                if (
+                    len(self.shapesBackups[-1]) > index
+                    and self.shapesBackups[-1][index].points
+                    != self.shapes[index].points
+                ):
+                    self.hShape.touch()  # Update modification timestamp
+                    self.storeShapes()
+                    self.shapeMoved.emit()
+            else:
+                logger.warning(
+                    "movingShape released with stale hShape not in shapes; "
+                    "ignoring (cache coherence bug?)"
+                )
             self.movingShape = False
         self._dpm_ghost_pos = None  # Clear ghost cursor
         # End vertex dragging and restore cursor
@@ -3108,6 +3141,7 @@ class Canvas(QtWidgets.QWidget):
                 self.shapes.remove(shape)
                 deleted_shapes.append(shape)
             self.sortShapesByArea()
+            self._clearStaleHoverState()
             self.storeShapes()
             self.selectedShapes = []
             self.update()
@@ -3119,6 +3153,7 @@ class Canvas(QtWidgets.QWidget):
         if shape in self.shapes:
             self.shapes.remove(shape)
         self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.storeShapes()
         self.update()
 
@@ -4073,6 +4108,12 @@ class Canvas(QtWidgets.QWidget):
     def undoLastLine(self):
         assert self.shapes
         self.current = self.shapes.pop()
+        # Keep the cached paint/hover orders coherent with self.shapes —
+        # otherwise the popped shape lives on as a ghost that is painted
+        # and hoverable but crashes on interaction (shapes.index ValueError,
+        # e.g. create point -> cancel the label dialog -> drag the ghost).
+        self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.current.setOpen()
         self.current.restoreShapeRaw()
         if self.createMode in ["polygon", "linestrip"]:
@@ -4142,6 +4183,8 @@ class Canvas(QtWidgets.QWidget):
         self.hShape = None
         self.hVertex = None
         self.hEdge = None
+        self.hEdgeMidpoint = None
+        self._clearStaleHoverState()  # also drops stale prevh* references
         self.update()
 
     def sortShapesByArea(self):
