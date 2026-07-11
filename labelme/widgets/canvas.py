@@ -4146,12 +4146,18 @@ class Canvas(QtWidgets.QWidget):
 
     def sortShapesByArea(self):
         """Rebuild cached sort orders for painting and hover detection."""
+        # boundingRect() builds a QPainterPath per call; the two sort keys
+        # used to invoke it 4x per shape. Compute each area exactly once.
+        areas: dict[int, float] = {}
+        for s in self.shapes:
+            rect = s.boundingRect()
+            areas[id(s)] = rect.width() * rect.height()
         # Paint order: largest first, points on top (drawn last)
         self._shapes_paint_order = sorted(
             self.shapes,
             key=lambda s: (
                 1 if s.shape_type == "point" else 0,
-                -(s.boundingRect().width() * s.boundingRect().height()),
+                -areas[id(s)],
             ),
         )
         # Hover order: selected first, then smallest first, points first
@@ -4160,7 +4166,7 @@ class Canvas(QtWidgets.QWidget):
             key=lambda s: (
                 0 if s.selected else 1,
                 0 if s.shape_type == "point" else 1,
-                s.boundingRect().width() * s.boundingRect().height(),
+                areas[id(s)],
             ),
         )
 

@@ -318,11 +318,15 @@ class Shape:
             painter.drawPath(line_path)
             # Skip vertex drawing for magic wand preview
             if not self._mw_preview:
+                # isEmpty() (not length() > 0): length() walks the whole path
+                # computing its perimeter just to test emptiness. drawVertex
+                # only adds ellipses/rects with positive size, so
+                # "has elements" is equivalent to "perimeter > 0" here.
                 # Draw start vertex in white when creating
-                if self._is_creating and start_vrtx_path.length() > 0:
+                if self._is_creating and not start_vrtx_path.isEmpty():
                     painter.fillPath(start_vrtx_path, QtGui.QColor(255, 255, 255))
                     painter.drawPath(start_vrtx_path)
-                if vrtx_path.length() > 0:
+                if not vrtx_path.isEmpty():
                     # Hide vertex only for selected shape during vertex dragging
                     # Non-selected shapes always show their vertices
                     if not self._is_line_preview and (not self.selected or not Shape.hide_vertex_outline):
