@@ -1481,7 +1481,8 @@ class Canvas(QtWidgets.QWidget):
             if self.hShape in self.shapes:
                 index = self.shapes.index(self.hShape)
                 if (
-                    len(self.shapesBackups[-1]) > index
+                    self.shapesBackups
+                    and len(self.shapesBackups[-1]) > index
                     and self.shapesBackups[-1][index].points
                     != self.shapes[index].points
                 ):
