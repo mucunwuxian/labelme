@@ -464,7 +464,7 @@ class Canvas(QtWidgets.QWidget):
         show_crosshair = (
             (self._vertex_dragging and self.prevMovePoint is not None)
             or (self.drawing() and self.current and self.prevMovePoint is not None)
-            or (self.createMode in ["point", "polygon", "rectangle", "magic_wand"] and self.drawing() and self.prevMovePoint is not None)
+            or (self.createMode in ["point", "polygon", "polygon3", "rectangle", "magic_wand"] and self.drawing() and self.prevMovePoint is not None)
         ) and not self._near_start_point
 
         # Determine crosshair color
@@ -472,7 +472,7 @@ class Canvas(QtWidgets.QWidget):
             crosshair_color = QtGui.QColor(self.hShape.line_color)
         elif self.current is not None:
             crosshair_color = QtGui.QColor(self.current.line_color)
-        elif self.createMode in ["point", "polygon", "rectangle", "magic_wand"]:
+        elif self.createMode in ["point", "polygon", "polygon3", "rectangle", "magic_wand"]:
             crosshair_color = QtGui.QColor(Shape.line_color)
         else:
             crosshair_color = QtGui.QColor(128, 128, 128)
@@ -574,6 +574,19 @@ class Canvas(QtWidgets.QWidget):
         else:
             self._grayscale_cache = None
 
+    def warmImageCaches(self) -> None:
+        """Build the image caches ahead of the first interaction.
+
+        loadPixmap defers them so switching files stays fast, but the status
+        bar's pixel readout and the magnets need them, so the cost would
+        otherwise land on the user's first mouse move as a visible freeze
+        (~600 ms on a 4K image). Callers schedule this right after a load,
+        once the window has been painted.
+        """
+        if self._image_caches_ready or self.pixmap is None or self.pixmap.isNull():
+            return
+        self._ensureImageCaches()
+
     def getPixelInfo(self, pos: QPointF):
         """Return (R, G, B, Gray) at image position, or None if out of bounds."""
         self._ensureImageCaches()
@@ -615,6 +628,7 @@ class Canvas(QtWidgets.QWidget):
     def createMode(self, value):
         if value not in [
             "polygon",
+            "polygon3",
             "rectangle",
             "circle",
             "line",
@@ -744,7 +758,19 @@ class Canvas(QtWidgets.QWidget):
     def leaveEvent(self, a0: QtCore.QEvent) -> None:
         if self._cursor_debug:
             self._log_cursor_state("leaveEvent:before")
-        self.unHighlight()
+        # Keep the editing state while a drag is in progress: dropping hShape
+        # here loses the shape being moved, so mouseReleaseEvent can neither
+        # store an undo snapshot nor emit shapeMoved and the edit is silently
+        # left out of the undo history (and of the dirty state).
+        dragging = (
+            self._vertex_dragging
+            or self._edge_midpoint_dragging
+            or self.movingShape
+            or bool(self.selectedShapesCopy)
+            or self._mouse_pressed
+        )
+        if not dragging:
+            self.unHighlight()
         self.restoreCursor()
         self._cursor_overlay.hideCursor()
         if self._cursor_debug:
@@ -988,12 +1014,14 @@ class Canvas(QtWidgets.QWidget):
         if self.drawing():
             if self.createMode in ["ai_polygon", "ai_mask"]:
                 self.line.shape_type = "points"
-            elif self.createMode == "magic_wand":
+            elif self.createMode in ("magic_wand", "polygon3"):
+                # polygon3 is a drawing mode, not a Shape type: it produces
+                # ordinary polygons, so the preview line uses "polygon".
                 self.line.shape_type = "polygon"
             else:
                 self.line.shape_type = self.createMode
 
-            if self.current or self.createMode in ["point", "polygon", "rectangle", "magic_wand"]:
+            if self.current or self.createMode in ["point", "polygon", "polygon3", "rectangle", "magic_wand"]:
                 # Hide cursor when drawing (show crosshair instead)
                 if self._custom_cursor_enabled:
                     self.overrideCursor(self._blank_cursor)
@@ -1010,8 +1038,11 @@ class Canvas(QtWidgets.QWidget):
                 # update is deliberate — a stale-prone coordinate cache for
                 # strip invalidation was tried and reverted per review.)
                 if (
-                    self._crosshair[self._createMode]
-                    and self._createMode not in ("point", "polygon")
+                    self._crosshair.get(
+                        "polygon" if self._createMode == "polygon3"
+                        else self._createMode, False
+                    )
+                    and self._createMode not in ("point", "polygon", "polygon3")
                 ):
                     self.update()
                 self._update_status()
@@ -1028,7 +1059,7 @@ class Canvas(QtWidgets.QWidget):
             elif (
                 self.snapping
                 and len(self.current) > 1
-                and self.createMode == "polygon"
+                and self.createMode in ("polygon", "polygon3")
                 and self.closeEnough(pos, self.current[0])
             ):
                 # Attract line to starting point and
@@ -1050,7 +1081,7 @@ class Canvas(QtWidgets.QWidget):
             if (
                 not is_shift_pressed
                 and not self._near_start_point
-                and self.createMode == "polygon"
+                and self.createMode in ("polygon", "polygon3")
             ):
                 snapped = self._snap_to_dark_pixel(pos, self._pending_draw_label)
                 if snapped is not pos:
@@ -1061,7 +1092,7 @@ class Canvas(QtWidgets.QWidget):
                     self._dpm_ghost_pos = None
             else:
                 self._dpm_ghost_pos = None
-            if self.createMode in ["polygon", "linestrip"]:
+            if self.createMode in ["polygon", "polygon3", "linestrip"]:
                 self.line.points = [self.current[-1], pos]
                 self.line.point_labels = [1, 1]
             elif self.createMode in ["ai_polygon", "ai_mask"]:
@@ -1170,9 +1201,32 @@ class Canvas(QtWidgets.QWidget):
         _hover_iter = [
             s for s in self.selectedShapes if s in self._shapes_hover_order
         ] + [s for s in self._shapes_hover_order if s not in self.selectedShapes]
+        # Widest reach of the hit tests below, in image units: the edge
+        # midpoint capsule (epsilon * 4) and the point-shape handle are the
+        # largest, and shapes are stored in image coordinates while epsilon
+        # is in device pixels.
+        hover_margin = (
+            max(self.epsilon * 4.0, Shape.point_object_size * 1.5)
+            / max(self.scale, 1e-9)
+        )
         for shape in _hover_iter:
             if not self.isVisible(shape):
                 continue
+            # Cheap rejection first: everything below (vertex, edge, edge
+            # midpoint and interior tests) only reports a hit within
+            # hover_margin of the shape's own bounds, so shapes further away
+            # need no per-vertex work at all. Bounds come straight from the
+            # points, nothing is cached, so this cannot go stale.
+            bounds = self._shapeImageBounds(shape)
+            if bounds is not None:
+                min_x, min_y, max_x, max_y = bounds
+                if (
+                    pos.x() < min_x - hover_margin
+                    or pos.x() > max_x + hover_margin
+                    or pos.y() < min_y - hover_margin
+                    or pos.y() > max_y + hover_margin
+                ):
+                    continue
             # Look for a nearby vertex to highlight. If that fails,
             # check if we happen to be inside a shape.
             index = shape.nearestVertex(pos, self.epsilon)
@@ -1364,7 +1418,15 @@ class Canvas(QtWidgets.QWidget):
                     redo_action.setEnabled(False)
                 if self.current:
                     # Add point to existing shape.
-                    if self.createMode == "polygon":
+                    if self.createMode == "polygon3":
+                        # Fixed 3-vertex polygon: close as soon as the third
+                        # point is placed (no need to click the start point).
+                        self.current.addPoint(self.line[1])
+                        self.line[0] = self.current[-1]
+                        if len(self.current.points) >= 3:
+                            self.current.close()
+                            self.finalise()
+                    elif self.createMode == "polygon":
                         self.current.addPoint(self.line[1])
                         self.line[0] = self.current[-1]
                         if self.current.isClosed():
@@ -1403,16 +1465,18 @@ class Canvas(QtWidgets.QWidget):
                             return
 
                     # Create new shape.
-                    self.current = Shape(
-                        shape_type="points"
-                        if self.createMode in ["ai_polygon", "ai_mask"]
-                        else self.createMode
-                    )
+                    if self.createMode in ["ai_polygon", "ai_mask"]:
+                        new_shape_type = "points"
+                    elif self.createMode == "polygon3":
+                        new_shape_type = "polygon"  # saved as a normal polygon
+                    else:
+                        new_shape_type = self.createMode
+                    self.current = Shape(shape_type=new_shape_type)
                     self.current._is_creating = True  # Mark as being created
                     # Dark pixel magnet on first click (polygon only)
                     if (
                         not is_shift_pressed
-                        and self.createMode == "polygon"
+                        and self.createMode in ("polygon", "polygon3")
                     ):
                         snapped = self._snap_to_dark_pixel(
                             pos, self._pending_draw_label
@@ -3334,6 +3398,37 @@ class Canvas(QtWidgets.QWidget):
             + Canvas._PAINT_MARGIN_SLACK
         )
 
+    @staticmethod
+    def _shapeImageBounds(shape):
+        """(min_x, min_y, max_x, max_y) of a shape in image coordinates.
+
+        Equal to shape.boundingRect() for every shape type — makePath draws
+        a rect for rectangle/mask, an ellipse around the centre for circle
+        and a polyline through the points otherwise — but without building a
+        QPainterPath. Returns None when the shape has no points.
+        """
+        points = shape.points
+        if not points:
+            return None
+        if shape.shape_type == "circle" and len(points) == 2:
+            cx, cy = points[0].x(), points[0].y()
+            dx, dy = points[1].x() - cx, points[1].y() - cy
+            r = (dx * dx + dy * dy) ** 0.5
+            return cx - r, cy - r, cx + r, cy + r
+        min_x = max_x = points[0].x()
+        min_y = max_y = points[0].y()
+        for pt in points:
+            x, y = pt.x(), pt.y()
+            if x < min_x:
+                min_x = x
+            elif x > max_x:
+                max_x = x
+            if y < min_y:
+                min_y = y
+            elif y > max_y:
+                max_y = y
+        return min_x, min_y, max_x, max_y
+
     def _shapeDeviceRect(self, shape) -> QtCore.QRectF | None:
         """Widget-coordinate bounds of a shape's points, or None if unknown.
 
@@ -3495,11 +3590,14 @@ class Canvas(QtWidgets.QWidget):
 
         # draw crosshair (not for point/polygon - they have custom crosshair only)
         if (
-            self._crosshair[self._createMode]
+            self._crosshair.get(
+                "polygon" if self._createMode == "polygon3" else self._createMode,
+                False,
+            )
             and self.drawing()
             and self.prevMovePoint is not None
             and not self.outOfPixmap(self.prevMovePoint)
-            and self.createMode not in ["point", "polygon"]
+            and self.createMode not in ["point", "polygon", "polygon3"]
         ):
             p.setPen(QtGui.QColor(0, 0, 0, 128))
             p.drawLine(
@@ -3691,7 +3789,7 @@ class Canvas(QtWidgets.QWidget):
             return
 
         drawing_shape: Shape = self.current.copy()
-        if self.createMode == "polygon":
+        if self.createMode in ("polygon", "polygon3"):
             # Add preview point when near start
             if self._near_start_point and len(self.current.points) >= 2:
                 drawing_shape.addPoint(self.line[1])
@@ -4455,7 +4553,7 @@ class Canvas(QtWidgets.QWidget):
         self._clearStaleHoverState()
         self.current.setOpen()
         self.current.restoreShapeRaw()
-        if self.createMode in ["polygon", "linestrip"]:
+        if self.createMode in ["polygon", "polygon3", "linestrip"]:
             self.line.points = [self.current[-1], self.current[0]]
         elif self.createMode in ["rectangle", "line", "circle"]:
             self.current.points = self.current.points[0:1]
@@ -4522,11 +4620,16 @@ class Canvas(QtWidgets.QWidget):
     def sortShapesByArea(self):
         """Rebuild cached sort orders for painting and hover detection."""
         # boundingRect() builds a QPainterPath per call; the two sort keys
-        # used to invoke it 4x per shape. Compute each area exactly once.
+        # used to invoke it 4x per shape. Compute each area exactly once,
+        # straight from the points (identical values, no path build).
         areas: dict[int, float] = {}
         for s in self.shapes:
-            rect = s.boundingRect()
-            areas[id(s)] = rect.width() * rect.height()
+            bounds = self._shapeImageBounds(s)
+            if bounds is None:
+                areas[id(s)] = 0.0
+            else:
+                min_x, min_y, max_x, max_y = bounds
+                areas[id(s)] = (max_x - min_x) * (max_y - min_y)
         # Paint order: largest first, points on top (drawn last)
         self._shapes_paint_order = sorted(
             self.shapes,

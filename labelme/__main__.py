@@ -261,6 +261,7 @@ def main():
         filename=filename,
         output_file=output_file,
         output_dir=output_dir,
+        prompt_for_dir=True,
     )
 
     if reset_config:

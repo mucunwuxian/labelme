@@ -3,7 +3,9 @@ import builtins
 import contextlib
 import io
 import json
+import os
 import os.path as osp
+import tempfile
 from typing import TypedDict
 
 import numpy as np
@@ -267,12 +269,32 @@ class LabelFile:
         for key, value in otherData.items():
             assert key not in data
             data[key] = value
+        # Write to a temporary file in the same directory and rename it into
+        # place: opening the target directly truncates it first, so a failure
+        # (disk full, crash, permissions) would destroy the existing
+        # annotations. os.replace is atomic on the same filesystem.
+        directory = osp.dirname(osp.abspath(filename))
+        tmp_path = None
         try:
-            with open(filename, "w") as f:
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=osp.basename(filename) + ".", suffix=".tmp", dir=directory
+            )
+            with builtins.open(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, filename)
+            tmp_path = None
             self.filename = filename
         except Exception as e:
             raise LabelFileError(e)
+        finally:
+            if tmp_path is not None and osp.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.warning("Failed removing temp file: {!r}", tmp_path)
 
     @staticmethod
     def is_label_file(filename):

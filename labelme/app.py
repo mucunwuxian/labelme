@@ -179,6 +179,7 @@ class MainWindow(QtWidgets.QMainWindow):
         output: str | None = None,
         output_file: str | None = None,
         output_dir: str | None = None,
+        prompt_for_dir: bool = False,
     ) -> None:
         if output is not None:
             logger.warning("argument output is deprecated, use output_file instead")
@@ -609,6 +610,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing polygons"),
             enabled=False,
         )
+        createPolygon3Mode = action(
+            self.tr("3点ポリゴン\nを作成"),
+            lambda: self._switch_canvas_mode(edit=False, createMode="polygon3"),
+            None,
+            "polygon3.svg",
+            self.tr("3点を置くとポリゴンが確定します"),
+            enabled=False,
+        )
         createRectangleMode = action(
             self.tr("Create Rectangle"),
             lambda: self._switch_canvas_mode(edit=False, createMode="rectangle"),
@@ -718,6 +727,18 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcuts["paste_polygon"],
             "paste",
             self.tr("Paste copied polygons"),
+            enabled=False,
+        )
+        rectToTriangle = action(
+            self.tr("矩形を3点\nポリゴンに変換"),
+            self.convertRectanglesToTriangles,
+            None,
+            "rect-to-triangle.svg",
+            self.tr(
+                "選択中の矩形を、.labelmerc の "
+                "rect_to_triangle_drop_corner で指定した隅を除いた"
+                "3点ポリゴンに変換"
+            ),
             enabled=False,
         )
         deleteAllShapes = action(
@@ -855,6 +876,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         redo.setVisible(False)
 
+        showCreatePolygon3 = action(
+            self.tr("3点ポリゴンを作成ボタンを表示"),
+            self._toggle_create_polygon3_visible,
+            checkable=True,
+            checked=False,
+        )
         showCreateCircle = action(
             self.tr("円を作成ボタンを表示"),
             self._toggle_create_circle_visible,
@@ -896,6 +923,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._toggle_redo_visible,
             checkable=True,
             checked=False,
+        )
+        showRectToTriangle = action(
+            self.tr("矩形を3点ポリゴンに変換ボタンを表示"),
+            self._toggle_rect_to_triangle_visible,
+            checkable=True,
+            checked=True,
         )
         showDeleteAllShapes = action(
             self.tr("ポリゴン一括削除ボタンを表示"),
@@ -1392,6 +1425,8 @@ class MainWindow(QtWidgets.QMainWindow):
             fitWidth=fitWidth,
             brightnessContrast=brightnessContrast,
             redo=redo,
+            createPolygon3Mode=createPolygon3Mode,
+            showCreatePolygon3=showCreatePolygon3,
             showCreateCircle=showCreateCircle,
             showCreateLine=showCreateLine,
             showCreateLineStrip=showCreateLineStrip,
@@ -1411,6 +1446,8 @@ class MainWindow(QtWidgets.QMainWindow):
             showLineWidth=showLineWidth,
             showPointObjectSize=showPointObjectSize,
             showVertexSize=showVertexSize,
+            rectToTriangle=rectToTriangle,
+            showRectToTriangle=showRectToTriangle,
             showDeleteAllShapes=showDeleteAllShapes,
             showRemoveHighIouShapes=showRemoveHighIouShapes,
             showCopyFromSpecifiedJson=showCopyFromSpecifiedJson,
@@ -1430,6 +1467,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.draw_actions: list[tuple[str, QtWidgets.QAction]] = [
             ("polygon", createMode),
+            ("polygon3", createPolygon3Mode),
             ("rectangle", createRectangleMode),
             ("point", createPointMode),
             ("circle", createCircleMode),
@@ -1453,6 +1491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_load_active_actions = (
             close,
             createMode,
+            createPolygon3Mode,
             createRectangleMode,
             createCircleMode,
             createLineMode,
@@ -1549,6 +1588,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.actions.toggle_keep_prev_brightness_contrast,
                 None,
                 showCreateMagicWand,
+                showCreatePolygon3,
                 showCreateCircle,
                 showCreateLine,
                 showCreateLineStrip,
@@ -1556,6 +1596,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 showCreateAiMask,
                 None,
                 showRedo,
+                showRectToTriangle,
                 showDeleteAllShapes,
                 showRemoveHighIouShapes,
                 showCopyFromSpecifiedJson,
@@ -1628,6 +1669,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     delete,
                     undo,
                     redo,
+                    rectToTriangle,
                     deleteAllShapes,
                     removeHighIouShapes,
                     copyFromSpecifiedJson,
@@ -1811,6 +1853,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.parallelLineDistCheckbox.setChecked(parallelLineDistEnabled)
         for key, toggle_fn in (
+            ("showCreatePolygon3", self._toggle_create_polygon3_visible),
             ("showCreateCircle", self._toggle_create_circle_visible),
             ("showCreateLine", self._toggle_create_line_visible),
             ("showCreateLineStrip", self._toggle_create_linestrip_visible),
@@ -1825,6 +1868,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.showRedo.setChecked(showRedoEnabled)
         self._toggle_redo_visible(showRedoEnabled)
         for key, action_, toggle, default_visible in (
+            ("view/showRectToTriangle", "showRectToTriangle",
+             self._toggle_rect_to_triangle_visible, True),
             ("view/showDeleteAllShapes", "showDeleteAllShapes",
              self._toggle_delete_all_shapes_visible, True),
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes",
@@ -1899,9 +1944,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._load_file(filename=filename)
         else:
             self.filename = None
-            # First launch (or stale prev dir): prompt the user to pick a folder
-            # once the main window has been shown.
-            if not (self._prev_opened_dir and osp.exists(self._prev_opened_dir)):
+            # First launch (or stale prev dir): prompt the user to pick a
+            # folder once the main window has been shown. Only when the app
+            # asked for it (__main__), never for an embedded/test window —
+            # a modal dialog nobody can close would hang the caller.
+            if prompt_for_dir and not (
+                self._prev_opened_dir and osp.exists(self._prev_opened_dir)
+            ):
                 QtCore.QTimer.singleShot(0, self._open_dir_with_dialog)
 
         # Populate the File menu dynamically.
@@ -2075,9 +2124,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"/{self.fileListWidget.count()}]"
                 )
             # Add JSON last modified time
-            label_file = f"{osp.splitext(self.imagePath)[0]}.json"
-            if self.output_dir:
-                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            label_file = self._labelFileForImage(self.imagePath)
             if osp.exists(label_file):
                 import datetime
                 mtime = osp.getmtime(label_file)
@@ -2094,12 +2141,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._config["auto_save"] or self.actions.saveAuto.isChecked():
             assert self.imagePath
-            label_file = f"{osp.splitext(self.imagePath)[0]}.json"
-            if self.output_dir:
-                label_file_without_path = osp.basename(label_file)
-                label_file = osp.join(self.output_dir, label_file_without_path)
-            self.saveLabels(label_file)
-            return
+            label_file = self._labelFileForImage(self.imagePath)
+            if self.saveLabels(label_file):
+                return
+            # Saving failed (saveLabels already reported why): keep the
+            # document dirty so the work is not silently lost.
+            logger.warning("auto save failed: {!r}", label_file)
         self._is_changed = True
         self.actions.save.setEnabled(True)
         self.setWindowTitle(self._get_window_title(dirty=True))
@@ -2552,9 +2599,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(n_selected)
         self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected)
+        self.actions.rectToTriangle.setEnabled(
+            any(s.shape_type == "rectangle" for s in selected_shapes)
+        )
         self._update_change_same_action()
 
     def addLabel(self, shape):
+        label_list_item, x, y = self._createLabelItem(shape)
+
+        # Insert in sorted order (key1: y, key2: x)
+        insert_row = 0
+        for row in range(self.labelList._model.rowCount()):
+            item = self.labelList._model.item(row)
+            if item:
+                other_shape = item.shape()
+                if other_shape and other_shape.points:
+                    other_x = min(p.x() for p in other_shape.points)
+                    other_y = min(p.y() for p in other_shape.points)
+                    if (y, x) < (other_y, other_x):
+                        break
+            insert_row = row + 1
+        self.labelList._model.insertRow(insert_row, label_list_item)
+        self._applyLabelItemText(shape, label_list_item, x, y)
+
+    def _addLabelsSorted(self, shapes) -> bool:
+        """Add many labels at once, ordered like repeated sorted inserts.
+
+        addLabel scans every existing row (recomputing its shape's min x/y)
+        to find the insert position, which is O(n^2 * vertices) when a whole
+        file is loaded or an undo reloads every shape. Sorting once and
+        appending is equivalent *while the list starts empty*: the scan
+        inserts after all rows with an equal key, i.e. exactly what a stable
+        sort produces. Returns False when the caller must use addLabel
+        (non-empty list, e.g. keep-previous shapes or a user-reordered list,
+        and shapes without points, which the scan treats specially).
+        """
+        if self.labelList._model.rowCount() != 0:
+            return False
+        if any(not shape.points for shape in shapes):
+            return False
+        prepared = []
+        for shape in shapes:
+            item, x, y = self._createLabelItem(shape)
+            prepared.append(((y, x), item, shape, x, y))
+        prepared.sort(key=lambda entry: entry[0])  # stable: ties keep order
+        model = self.labelList._model
+        for _, item, shape, x, y in prepared:
+            model.appendRow(item)
+            self._applyLabelItemText(shape, item, x, y)
+        return True
+
+    def _applyLabelItemText(self, shape, label_list_item, x, y) -> None:
+        if shape.group_id is None:
+            text = shape.label
+        else:
+            text = f"{shape.label} ({shape.group_id})"
+        self._update_shape_color(shape)
+        r, g, b = shape.fill_color.getRgb()[:3]
+        label_list_item.setText(
+            f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font>'
+            f" ({int(x)},{int(y)})"
+        )
+
+    def _createLabelItem(self, shape):
+        """Build the label-list row for a shape (everything addLabel does
+        except choosing where to insert it). Returns (item, x, y)."""
         if shape.group_id is None:
             text = shape.label
         else:
@@ -2572,20 +2681,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Highlight shapes without modification timestamp
         if not getattr(shape, 'modified_at', None):
             label_list_item.setBackground(self.SHAPE_UNMODIFIED_COLOR)
-
-        # Insert in sorted order (key1: y, key2: x)
-        insert_row = 0
-        for row in range(self.labelList._model.rowCount()):
-            item = self.labelList._model.item(row)
-            if item:
-                other_shape = item.shape()
-                if other_shape and other_shape.points:
-                    other_x = min(p.x() for p in other_shape.points)
-                    other_y = min(p.y() for p in other_shape.points)
-                    if (y, x) < (other_y, other_x):
-                        break
-            insert_row = row + 1
-        self.labelList._model.insertRow(insert_row, label_list_item)
 
         if self.uniqLabelList.find_label_item(shape.label) is None:
             # Insert first with placeholder color, then update with correct
@@ -2606,11 +2701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for action in self.on_shapes_present_actions:
             action.setEnabled(True)
 
-        self._update_shape_color(shape)
-        r, g, b = shape.fill_color.getRgb()[:3]
-        label_list_item.setText(
-            f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font> ({int(x)},{int(y)})'
-        )
+        return label_list_item, x, y
 
     def _update_shape_color(self, shape):
         r, g, b = self._get_rgb_by_label(shape.label)
@@ -2699,8 +2790,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_shapes(self, shapes: list[Shape], replace: bool = True) -> None:
         self.labelList.itemSelectionChanged.disconnect(self._label_selection_changed)
         shape: Shape
-        for shape in shapes:
-            self.addLabel(shape)
+        if not self._addLabelsSorted(shapes):
+            for shape in shapes:
+                self.addLabel(shape)
         # Re-update all shape colors after all labels are added to uniqLabelList
         # This is necessary because sorted insertion may change label indices
         self._refresh_all_shape_colors()
@@ -2982,11 +3074,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if (idx & 0x7) == 0:
                 progress.setValue(idx)
                 QtWidgets.QApplication.processEvents()
-            label_file = f"{osp.splitext(img_path)[0]}.json"
-            if self.output_dir:
-                label_file = osp.join(
-                    self.output_dir, osp.basename(label_file)
-                )
+            label_file = self._labelFileForImage(img_path)
             if label_file in processed_label_files:
                 skipped += 1
                 continue
@@ -3077,7 +3165,11 @@ class MainWindow(QtWidgets.QMainWindow):
             for j in range(i + 1, len(shapes)):
                 if j in to_remove:
                     continue
-                if _iou(bboxes[i], bboxes[j]) > 0.9:
+                if (
+                    shapes[i].label == shapes[j].label
+                    and shapes[i].shape_type == shapes[j].shape_type
+                    and _iou(bboxes[i], bboxes[j]) > 0.9
+                ):
                     # Keep the one with modified_at set; if both set, keep newer
                     ts_i = shapes[i].modified_at
                     ts_j = shapes[j].modified_at
@@ -3123,8 +3215,18 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             removed_shapes = [shapes[idx] for idx in sorted(to_remove, reverse=True)]
-            for shape in removed_shapes:
-                self.canvas.deleteShape(shape)
+            # Remove them as a single transaction: deleteShape() snapshots
+            # after every shape, so a bulk removal used to push the earlier
+            # states out of the (10 deep) undo stack and become unrecoverable.
+            remaining = [s for s in self.canvas.shapes if s not in set(removed_shapes)]
+            self.canvas.shapes = remaining
+            self.canvas.selectedShapes = [
+                s for s in self.canvas.selectedShapes if s in set(remaining)
+            ]
+            self.canvas.sortShapesByArea()
+            self.canvas._clearStaleHoverState()
+            self.canvas.storeShapes()
+            self.canvas.update()
             self.remLabels(removed_shapes)
             self.setDirty()
         finally:
@@ -3163,9 +3265,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(current_row - 1, -1, -1):
             item = self.fileListWidget.item(i)
             prev_path = item.data(Qt.UserRole) or item.text()
-            label_file = f"{osp.splitext(prev_path)[0]}.json"
-            if self.output_dir:
-                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            label_file = self._labelFileForImage(prev_path)
             if not osp.exists(label_file):
                 continue
             if self._loadShapesFromJsonFile(label_file):
@@ -3645,6 +3745,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if toolbar_action is not None:
                 toolbar_action.setVisible(checked)
 
+    def _toggle_create_polygon3_visible(self, checked: bool) -> None:
+        self._toggle_create_button_visible("createPolygon3Mode", checked)
+
     def _toggle_create_circle_visible(self, checked: bool) -> None:
         self._toggle_create_button_visible("createCircleMode", checked)
 
@@ -3689,6 +3792,9 @@ class MainWindow(QtWidgets.QMainWindow):
             toolbar_action = buttons.get(action)
             if toolbar_action is not None:
                 toolbar_action.setVisible(checked)
+
+    def _toggle_rect_to_triangle_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(self.actions.rectToTriangle, checked)
 
     def _toggle_delete_all_shapes_visible(self, checked: bool) -> None:
         self._toggle_toolbar_button_visible(
@@ -3901,10 +4007,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         # assumes same name, but json extension
         self.show_status_message(self.tr("Loading %s...") % osp.basename(str(filename)))
-        label_file = f"{osp.splitext(filename)[0]}.json"
-        if self.output_dir:
-            label_file_without_path = osp.basename(label_file)
-            label_file = osp.join(self.output_dir, label_file_without_path)
+        label_file = self._labelFileForImage(filename)
         if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file):
             try:
                 self.labelFile = LabelFile(label_file)
@@ -3995,6 +4098,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Store the row index of the currently loaded file
         self._current_file_row = self.fileListWidget.currentRow()
         self.show_status_message(self.tr("Loaded %s") % osp.basename(filename))
+        # Pre-build the image caches once the window is responsive again:
+        # keeps file switching fast while avoiding a freeze on the first
+        # mouse move (which needs them for the pixel readout and magnets).
+        QtCore.QTimer.singleShot(0, self.canvas.warmImageCaches)
         logger.debug("loaded file: {!r}", filename)
         return True
 
@@ -4102,6 +4209,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.parallelLineDistCheckbox.isChecked(),
         )
         self.settings.setValue(
+            "view/showCreatePolygon3", self.actions.showCreatePolygon3.isChecked()
+        )
+        self.settings.setValue(
             "view/showCreateCircle", self.actions.showCreateCircle.isChecked()
         )
         self.settings.setValue(
@@ -4127,6 +4237,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "view/showRedo", self.actions.showRedo.isChecked()
         )
         for key, action_ in (
+            ("view/showRectToTriangle", "showRectToTriangle"),
             ("view/showDeleteAllShapes", "showDeleteAllShapes"),
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes"),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson"),
@@ -4293,33 +4404,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fileListWidget.setCurrentRow(self.imageList.index(current_filename))
             self.fileListWidget.repaint()
 
-    def saveFile(self, _value=False):
+    def saveFile(self, _value=False) -> bool:
+        """Save the current annotations. Returns True only when written."""
         assert not self.image.isNull(), "cannot save empty image"
         if self.labelFile:
             # DL20180323 - overwrite when in directory
-            self._saveFile(self.labelFile.filename)
+            return self._saveFile(self.labelFile.filename)
         elif self.output_file:
-            self._saveFile(self.output_file)
+            saved = self._saveFile(self.output_file)
             self.close()
+            return saved
         elif self.filename:
             if self.skipSaveNameConfirmCheckbox.isChecked():
                 # Auto-derive JSON filename from image filename
-                base = osp.splitext(self.filename)[0]
-                if self.output_dir:
-                    base = osp.join(
-                        self.output_dir, osp.basename(base)
-                    )
-                self._saveFile(base + LabelFile.suffix)
-            else:
-                self._saveFile(self.saveFileDialog())
+                return self._saveFile(self._labelFileForImage(self.filename))
+            return self._saveFile(self.saveFileDialog())
         else:
             # No filename set, cannot save
             logger.warning("Cannot save: no filename set")
-            return
+            return False
 
-    def saveFileAs(self, _value=False):
+    def saveFileAs(self, _value=False) -> bool:
         assert not self.image.isNull(), "cannot save empty image"
-        self._saveFile(self.saveFileDialog())
+        return self._saveFile(self.saveFileDialog())
 
     def saveFileDialog(self):
         assert self.filename is not None
@@ -4352,12 +4459,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return filename[0]
         return filename
 
-    def _saveFile(self, filename):
+    def _saveFile(self, filename) -> bool:
         if filename and self.saveLabels(filename):
             self.addRecentFile(filename)
             self.setClean()
             # Refresh cursor overlay after save
             self.canvas.refreshCursorOverlay()
+            return True
+        return False
 
     def closeFile(self, _value=False):
         if not self._can_continue():
@@ -4369,14 +4478,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileListWidget.setFocus()
         self.actions.saveAs.setEnabled(False)
 
+    def _labelFileForImage(self, image_path: str) -> str:
+        """JSON path for an image, honouring output_dir.
+
+        Every place that derives a label file must agree, otherwise saving,
+        deleting and the "annotated" state look at different files.
+        """
+        if image_path.lower().endswith(LabelFile.suffix):
+            label_file = image_path
+        else:
+            label_file = f"{osp.splitext(image_path)[0]}{LabelFile.suffix}"
+        if self.output_dir:
+            label_file = osp.join(self.output_dir, osp.basename(label_file))
+        return label_file
+
     def getLabelFile(self):
         assert self.filename is not None
-        if self.filename.lower().endswith(".json"):
-            label_file = self.filename
-        else:
-            label_file = f"{osp.splitext(self.filename)[0]}.json"
-
-        return label_file
+        return self._labelFileForImage(self.filename)
 
     def _compute_alpha_for_mtime(self, mtime: float) -> int:
         """Map mtime to alpha (FILE_ALPHA_MIN..FILE_ALPHA_MAX) using cached range."""
@@ -4531,9 +4649,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         # Check for annotation file
-        label_file = f"{osp.splitext(image_path)[0]}.json"
-        if self.output_dir:
-            label_file = osp.join(self.output_dir, osp.basename(label_file))
+        label_file = self._labelFileForImage(image_path)
 
         has_annotation = "No"
         annotation_modified = ""
@@ -4613,9 +4729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         area_per_file: list[float] = []
 
         for image_path in self.imageList:
-            label_file = f"{osp.splitext(image_path)[0]}.json"
-            if self.output_dir:
-                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            label_file = self._labelFileForImage(image_path)
             if not osp.exists(label_file):
                 continue
 
@@ -4859,7 +4973,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if answer == mb.Discard:
             return True
         elif answer == mb.Save:
-            self.saveFile()
+            if not self.saveFile():
+                # Save failed or the user cancelled the file dialog: stay on
+                # this document instead of discarding the changes.
+                return False
             return True
         else:  # answer == mb.Cancel
             return False
@@ -4919,6 +5036,94 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.noShapes():
             for action in self.on_shapes_present_actions:
                 action.setEnabled(False)
+
+    # Rectangle corners in drawing order, and which of them each setting drops.
+    _RECT_TO_TRIANGLE_CORNERS = ("top_left", "top_right", "bottom_right", "bottom_left")
+
+    def convertRectanglesToTriangles(self):
+        """Replace rectangles with 3-point polygons (e.g. an arrow bbox -> its
+        head triangle), dropping the corner named by
+        `rect_to_triangle_drop_corner` in the config.
+
+        Works on the selected rectangles, or on every rectangle when nothing
+        is selected. Labels, flags and other attributes are carried over and
+        the whole conversion is a single undo step.
+        """
+        drop = self._config.get("rect_to_triangle_drop_corner", "top_left")
+        if drop not in self._RECT_TO_TRIANGLE_CORNERS:
+            self.errorMessage(
+                self.tr("設定エラー"),
+                self.tr(
+                    "rect_to_triangle_drop_corner が不正です: {}<br>"
+                    "有効な値: {}"
+                ).format(drop, ", ".join(self._RECT_TO_TRIANGLE_CORNERS)),
+            )
+            return
+
+        targets = [
+            s
+            for s in self.canvas.selectedShapes
+            if s.shape_type == "rectangle" and len(s.points) == 2
+        ]
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.tr("矩形を3点ポリゴンに変換"),
+                self.tr("矩形を選択してください。"),
+            )
+            return
+
+        yes, no = QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No
+        msg = self.tr(
+            "選択中の矩形 {} 個を、{} を除いた3点ポリゴンに変換します。\n"
+            "本当に実施しますか？"
+        ).format(len(targets), drop)
+        if yes != QtWidgets.QMessageBox.warning(
+            self, self.tr("確認"), msg, yes | no, no
+        ):
+            return
+
+        drop_index = self._RECT_TO_TRIANGLE_CORNERS.index(drop)
+        converted = 0
+        for shape in targets:
+            p0, p1 = shape.points[0], shape.points[1]
+            left, right = min(p0.x(), p1.x()), max(p0.x(), p1.x())
+            top, bottom = min(p0.y(), p1.y()), max(p0.y(), p1.y())
+            corners = [
+                QtCore.QPointF(left, top),
+                QtCore.QPointF(right, top),
+                QtCore.QPointF(right, bottom),
+                QtCore.QPointF(left, bottom),
+            ]
+            del corners[drop_index]
+            shape.shape_type = "polygon"
+            shape.points = corners
+            shape.point_labels = [1] * len(corners)
+            shape.close()
+            shape.touch()
+            converted += 1
+
+        self.canvas.sortShapesByArea()
+        self.canvas.storeShapes()
+        self._update_shape_items_after_convert(targets)
+        self.canvas.update()
+        self.setDirty()
+        self._recompute_reference_medians()
+        self.show_status_message(
+            self.tr("%d個の矩形を3点ポリゴンに変換しました") % converted
+        )
+
+    def _update_shape_items_after_convert(self, shapes) -> None:
+        """Refresh the label-list rows of shapes whose geometry changed."""
+        for shape in shapes:
+            item = self.labelList.findItemByShape(shape)
+            if item is not None:
+                self._update_shape_color(shape)
+                item.setText(
+                    shape.label
+                    if shape.group_id is None
+                    else f"{shape.label} ({shape.group_id})"
+                )
 
     def deleteAllShapes(self):
         """Delete all shapes in the currently open image after confirmation."""
@@ -5007,10 +5212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for file in imageFiles:
             if file in self.imageList or not file.lower().endswith(tuple(extensions)):
                 continue
-            label_file = f"{osp.splitext(file)[0]}.json"
-            if self.output_dir:
-                label_file_without_path = osp.basename(label_file)
-                label_file = osp.join(self.output_dir, label_file_without_path)
+            label_file = self._labelFileForImage(file)
             # Display as {dir_name}/{file_name}
             dir_name = osp.basename(osp.dirname(file))
             file_name = osp.basename(file)
@@ -5078,9 +5280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Phase 1: Collect labels from JSONs AND populate mtime cache in one pass.
         all_labels: set[str] = set()
         for idx, filename in enumerate(filenames):
-            label_file = f"{osp.splitext(filename)[0]}.json"
-            if self.output_dir:
-                label_file = osp.join(self.output_dir, osp.basename(label_file))
+            label_file = self._labelFileForImage(filename)
             if osp.exists(label_file):
                 try:
                     self._file_mtimes[filename] = osp.getmtime(label_file)
@@ -5122,10 +5322,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fileListWidget.setUpdatesEnabled(False)
         try:
             for idx, filename in enumerate(filenames):
-                label_file = f"{osp.splitext(filename)[0]}.json"
-                if self.output_dir:
-                    label_file_without_path = osp.basename(label_file)
-                    label_file = osp.join(self.output_dir, label_file_without_path)
+                label_file = self._labelFileForImage(filename)
                 # Display as {dir_name}/{file_name}
                 dir_name = osp.basename(root_dir) if root_dir else ""
                 file_name = osp.basename(filename)

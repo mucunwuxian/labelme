@@ -96,6 +96,10 @@ canvas:
 #     luminance_threshold: 96
 magnet_defaults: {}
 
+# "矩形を3点ポリゴンに変換" button: which rectangle corner to drop.
+# One of: top_left, top_right, bottom_right, bottom_left
+rect_to_triangle_drop_corner: top_left
+
 # Parallel line magnet: rectangle edge snaps to parallel lines in the image.
 # Only active for rectangle edge midpoint drag with matching target_label.
 # Shift key cancels snap during drag.

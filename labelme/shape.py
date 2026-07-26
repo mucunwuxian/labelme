@@ -571,17 +571,14 @@ class Shape:
             )
             return dist <= visual_size / 2 / self.scale
         if self.mask is not None:
-            y = np.clip(
-                int(round(point.y() - self.points[0].y())),
-                0,
-                self.mask.shape[0] - 1,
-            )
-            x = np.clip(
-                int(round(point.x() - self.points[0].x())),
-                0,
-                self.mask.shape[1] - 1,
-            )
-            return self.mask[y, x]
+            # Clipping instead of rejecting made every point outside the mask
+            # map onto its border, so a click far away counted as a hit when
+            # the nearest border pixel was set.
+            y = int(round(point.y() - self.points[0].y()))
+            x = int(round(point.x() - self.points[0].x()))
+            if not (0 <= y < self.mask.shape[0] and 0 <= x < self.mask.shape[1]):
+                return False
+            return bool(self.mask[y, x])
         return self.makePath().contains(point)
 
     def makePath(self):
@@ -716,7 +713,30 @@ class Shape:
         self._highlightEdgeMidpoint = None
 
     def copy(self):
-        return copy.deepcopy(self)
+        """Snapshot of this shape, used for the undo stack.
+
+        copy.deepcopy was costing ~0.3 ms per shape, i.e. over a second per
+        edit on images with thousands of shapes. A shallow copy carries every
+        attribute across automatically (so nothing can be forgotten when new
+        fields are added); only the containers that editing mutates in place
+        are duplicated on top of it.
+        """
+        other = copy.copy(self)
+        other.points = [QtCore.QPointF(p) for p in self.points]
+        other.point_labels = list(self.point_labels)
+        other.flags = dict(self.flags) if isinstance(self.flags, dict) else self.flags
+        other.other_data = copy.deepcopy(self.other_data)
+        if self.mask is not None:
+            other.mask = self.mask.copy()
+        if self._shape_raw is not None:
+            raw_type, raw_points, raw_labels = self._shape_raw
+            other._shape_raw = (
+                raw_type,
+                [QtCore.QPointF(p) for p in raw_points],
+                list(raw_labels),
+            )
+        other._highlightSettings = dict(self._highlightSettings)
+        return other
 
     def __len__(self):
         return len(self.points)
