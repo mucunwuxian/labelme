@@ -5048,7 +5048,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # that is slow for its file count still gets feedback.
         progress: QtWidgets.QProgressDialog | None = None
         total = len(filenames)
-        if total >= 50:
+        if total >= 20:
             progress = QtWidgets.QProgressDialog(
                 self.tr("画像ファイルを読み込み中..."),
                 None,  # no cancel button

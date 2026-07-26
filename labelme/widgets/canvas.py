@@ -918,6 +918,7 @@ class Canvas(QtWidgets.QWidget):
         if self._vertex_dragging:
             if self._cursor_debug:
                 self._log_cursor_state("mouseMoveEvent:vertex_dragging")
+            prev_ghost_pos = self._dpm_ghost_pos
             # Always force blank cursor while dragging a vertex
             self._force_blank_cursor()
             # Dark pixel magnet: snap to dark pixel (polygon shapes only)
@@ -936,11 +937,43 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self._dpm_ghost_pos = None
             self.prevMovePoint = pos  # Update for crosshair drawing
+            moved_index = self.hVertex
+            moved_shape = self.hShape
+            old_point = None
+            if (
+                moved_shape is not None
+                and moved_index is not None
+                and moved_index < len(moved_shape.points)
+            ):
+                old_point = QPointF(moved_shape.points[moved_index])
+            before_rect = self._shapeDeviceRect(moved_shape)
             self.boundedMoveVertex(pos, is_shift_pressed=is_shift_pressed)
             self._updateCursorOverlay()
             # update() (not repaint()): coalesce to one paint per frame on
             # 60-120Hz mouse-move streams; rendered frames are identical.
-            self.update()
+            # Only the dragged shape changes, so invalidate just the area it
+            # can repaint differently instead of the whole canvas; combined
+            # with the paint-time culling this stops every other shape from
+            # being re-rendered on each drag frame.
+            dirty = self._vertexMoveDeviceRect(moved_shape, moved_index, old_point)
+            if dirty is None:
+                after_rect = self._shapeDeviceRect(moved_shape)
+                if before_rect is not None and after_rect is not None:
+                    dirty = before_rect.united(after_rect)
+            if dirty is not None:
+                m = self._shapeDrawMargin(moved_shape)
+                dirty = dirty.adjusted(-m, -m, m, m)
+                # The dark-pixel-magnet ghost marker is drawn at the raw
+                # cursor position, which can sit outside the shape bounds.
+                ghost = self._ghostDeviceRect(self._dpm_ghost_pos)
+                if ghost is not None:
+                    dirty = dirty.united(ghost)
+                ghost_prev = self._ghostDeviceRect(prev_ghost_pos)
+                if ghost_prev is not None:
+                    dirty = dirty.united(ghost_prev)
+                self.update(dirty.toAlignedRect())
+            else:
+                self.update()
             self.movingShape = True
             return
 
@@ -3202,6 +3235,158 @@ class Canvas(QtWidgets.QWidget):
         super().resizeEvent(event)
         self._cursor_overlay.setGeometry(self.rect())
 
+    # Slack (widget px) for antialiasing and float -> int rounding.
+    _PAINT_MARGIN_SLACK = 8.0
+
+    @staticmethod
+    def _shapeDrawMargin(shape) -> float:
+        """How far outside its own points a shape can put pixels.
+
+        drawVertex centres a handle of side/diameter ``d`` on each vertex,
+        so it reaches d / 2 beyond the point, plus half the outline pen.
+        ``d`` is point_object_size * 1.5 for point shapes, point_size * 3
+        for the MOVE_VERTEX highlight (only the shape currently holding a
+        highlighted vertex can use it) and point_size otherwise.
+        """
+        if shape is not None and shape.shape_type == "point":
+            handle = float(Shape.point_object_size) * 1.5
+        elif shape is not None and shape._highlightIndex is not None:
+            handle = float(Shape.point_size) * 3.0
+        else:
+            handle = float(Shape.point_size)
+        return (
+            handle / 2.0
+            + float(Shape.PEN_WIDTH) / 2.0
+            + Canvas._PAINT_MARGIN_SLACK
+        )
+
+    def _shapeDeviceRect(self, shape) -> QtCore.QRectF | None:
+        """Widget-coordinate bounds of a shape's points, or None if unknown.
+
+        Returns None for shapes whose painted extent is not derivable from
+        the points (mask), so callers fall back to a full update.
+        """
+        if shape is None:
+            return None
+        points = shape.points
+        if not points or shape.shape_type == "mask":
+            return None
+        if shape.shape_type == "circle" and len(points) == 2:
+            cx, cy = points[0].x(), points[0].y()
+            dx, dy = points[1].x() - cx, points[1].y() - cy
+            r = (dx * dx + dy * dy) ** 0.5
+            min_x, max_x, min_y, max_y = cx - r, cx + r, cy - r, cy + r
+        else:
+            xs = [pt.x() for pt in points]
+            ys = [pt.y() for pt in points]
+            min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
+        offset = self.offsetToCenter()
+        s = self.scale
+        return QtCore.QRectF(
+            QtCore.QPointF((min_x + offset.x()) * s, (min_y + offset.y()) * s),
+            QtCore.QPointF((max_x + offset.x()) * s, (max_y + offset.y()) * s),
+        )
+
+    # Half-extent (widget px) of the magnet ghost marker: 12 px arms + pen.
+    _GHOST_MARKER_RADIUS = 16.0
+
+    def _ghostDeviceRect(self, ghost_pos) -> QtCore.QRectF | None:
+        """Widget-coordinate bounds of the dark-pixel-magnet ghost marker."""
+        if ghost_pos is None:
+            return None
+        offset = self.offsetToCenter()
+        s = self.scale
+        cx = (ghost_pos.x() + offset.x()) * s
+        cy = (ghost_pos.y() + offset.y()) * s
+        r = self._GHOST_MARKER_RADIUS
+        return QtCore.QRectF(cx - r, cy - r, 2 * r, 2 * r)
+
+    def _vertexMoveDeviceRect(
+        self, shape, index, old_point
+    ) -> QtCore.QRectF | None:
+        """Area a single-vertex move can repaint, in widget coordinates.
+
+        moveVertexBy only rewrites points[index], so for multi-point shapes
+        the outline change is confined to the two edges touching that vertex.
+        The filled interior changes only between the old and new boundary
+        paths, which lie inside the convex hull of the moved vertex (old and
+        new) and its two neighbours — so that hull's bounds is a safe
+        superset. Returns None when the whole shape can move (rectangle,
+        circle) or its extent is unknown (mask), so the caller falls back to
+        the full-shape bounds.
+        """
+        if shape is None or index is None or old_point is None:
+            return None
+        points = shape.points
+        if index >= len(points):
+            return None
+        if shape.shape_type in ("rectangle", "circle", "mask"):
+            return None
+        candidates = [old_point, points[index]]
+        n = len(points)
+        if n > 1:
+            if shape.isClosed():
+                candidates.append(points[(index - 1) % n])
+                candidates.append(points[(index + 1) % n])
+            else:
+                if index > 0:
+                    candidates.append(points[index - 1])
+                if index + 1 < n:
+                    candidates.append(points[index + 1])
+        xs = [pt.x() for pt in candidates]
+        ys = [pt.y() for pt in candidates]
+        offset = self.offsetToCenter()
+        s = self.scale
+        return QtCore.QRectF(
+            QtCore.QPointF((min(xs) + offset.x()) * s, (min(ys) + offset.y()) * s),
+            QtCore.QPointF((max(xs) + offset.x()) * s, (max(ys) + offset.y()) * s),
+        )
+
+    def _shapeIntersectsRect(self, shape, cull_rect: QtCore.QRectF) -> bool:
+        """Whether the shape can paint inside cull_rect (widget coords).
+
+        Shapes draw at point * scale while the painter adds scale * offset,
+        so a point maps to (point + offset) * scale. Bounds come straight
+        from the points (no QPainterPath build). Mask shapes paint an image
+        whose extent is not derivable from the points, so they are never
+        culled.
+        """
+        points = shape.points
+        if not points or shape.shape_type == "mask":
+            return True
+        margin = self._shapeDrawMargin(shape)
+        if shape.shape_type == "circle" and len(points) == 2:
+            cx, cy = points[0].x(), points[0].y()
+            dx, dy = points[1].x() - cx, points[1].y() - cy
+            r = (dx * dx + dy * dy) ** 0.5
+            min_x, max_x = cx - r, cx + r
+            min_y, max_y = cy - r, cy + r
+        else:
+            min_x = max_x = points[0].x()
+            min_y = max_y = points[0].y()
+            for pt in points:
+                x, y = pt.x(), pt.y()
+                if x < min_x:
+                    min_x = x
+                elif x > max_x:
+                    max_x = x
+                if y < min_y:
+                    min_y = y
+                elif y > max_y:
+                    max_y = y
+        offset = self.offsetToCenter()
+        s = self.scale
+        left = (min_x + offset.x()) * s - margin
+        top = (min_y + offset.y()) * s - margin
+        right = (max_x + offset.x()) * s + margin
+        bottom = (max_y + offset.y()) * s + margin
+        return not (
+            right < cull_rect.left()
+            or left > cull_rect.right()
+            or bottom < cull_rect.top()
+            or top > cull_rect.bottom()
+        )
+
     def paintEvent(self, a0: QtGui.QPaintEvent) -> None:
         if not self.pixmap:
             return super().paintEvent(a0)
@@ -3242,17 +3427,22 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
+        # Qt clips painting to the event region, so shapes that fall entirely
+        # outside it contribute no pixels — skipping them is invisible but
+        # avoids re-rendering every off-screen shape on each drag frame.
+        cull_rect = QtCore.QRectF(a0.rect())
         selected_shapes = []
         for shape in self._shapes_paint_order:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 if shape.selected:
                     selected_shapes.append(shape)
-                else:
+                elif self._shapeIntersectsRect(shape, cull_rect):
                     shape.paint(p)
         # Draw selected shapes last so they appear on top
         for shape in selected_shapes:
-            shape.paint(p)
+            if self._shapeIntersectsRect(shape, cull_rect):
+                shape.paint(p)
         if self.current:
             self.current.paint(p)
             # Don't paint preview line for magic wand or near start point
