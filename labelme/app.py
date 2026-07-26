@@ -3569,14 +3569,15 @@ class MainWindow(QtWidgets.QMainWindow):
         medians: dict[str, float | None] = {}
         # Parallel line rules — margin from resize_base / margin_pixels
         for i, rule in enumerate(self._config.get("parallel_line_magnet", [])):
-            resize_base = rule.get("resize_base", 2560)
             margin_px = rule.get("margin_pixels", 10)
-            if self.canvas.pixmap is not None:
+            if self.canvas.pixmap is not None and not rule.get("absolute_pixels"):
+                resize_base = rule.get("resize_base", 2560)
                 img_w = self.canvas.pixmap.width()
                 img_h = self.canvas.pixmap.height()
                 scale = max(img_w, img_h) / resize_base
                 medians[f"pl:{i}"] = margin_px * scale
             else:
+                # absolute_pixels (or no image yet): plain image pixels
                 medians[f"pl:{i}"] = float(margin_px)
         # Text bounding: margin/snap computed directly in canvas from rule params
         self.canvas.setReferenceMedians(medians)

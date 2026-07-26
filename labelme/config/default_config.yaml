@@ -88,6 +88,9 @@ canvas:
 # Parallel line magnet: rectangle edge snaps to parallel lines in the image.
 # Only active for rectangle edge midpoint drag with matching target_label.
 # Shift key cancels snap during drag.
+# All magnets below take *_pixels relative to resize_base (the longer side of
+# a reference image), so they scale with the actual image size. Set
+# `absolute_pixels: true` on a rule to use plain image pixels instead.
 # Example:
 #   parallel_line_magnet:
 #     - target_label: "notes"

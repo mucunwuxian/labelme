@@ -1112,6 +1112,7 @@ class Canvas(QtWidgets.QWidget):
                 self.movingShape = True
             elif self.selectedShapes and self.prevPoint is not None:
                 self.overrideCursor(CURSOR_MOVE)
+                before_rects = self._shapesDeviceRect(self.selectedShapes)
                 self.boundedMoveShapes(self.selectedShapes, pos)
                 if (
                     self._auto_fit_enabled
@@ -1133,7 +1134,20 @@ class Canvas(QtWidgets.QWidget):
                     self._auto_fit_snap_targets.clear()
                     self._auto_fit_last_detect_pos = None
                     self._autoFitClearGuides()
-                self.update()
+                # Only the dragged shapes move: repaint their old and new
+                # areas instead of the whole canvas. Fall back to a full
+                # update when auto-fit guides are on screen (they span the
+                # canvas) or when a bound cannot be derived.
+                after_rects = self._shapesDeviceRect(self.selectedShapes)
+                if (
+                    before_rects is not None
+                    and after_rects is not None
+                    and not self._auto_fit_guides
+                    and self._snap_line_pos is None
+                ):
+                    self.update(before_rects.united(after_rects).toAlignedRect())
+                else:
+                    self.update()
                 self.movingShape = True
             return
 
@@ -1142,6 +1156,16 @@ class Canvas(QtWidgets.QWidget):
         # - Highlight vertex
         # Update shape/vertex fill and tooltip value accordingly.
         status_messages: list[str] = []
+        prev_hover_state = (
+            self.hShape, self.hVertex, self.hEdge, self.hEdgeMidpoint,
+        )
+        prev_label_visible = (
+            self._hover_label_ready
+            and self._hover_label_shape is not None
+            and self._hover_label_last_pos is not None
+        )
+        prev_label_shape = self._hover_label_shape
+        prev_label_pos = self._hover_label_last_pos
         # Iterate selected shapes first, then the rest (by hover order)
         _hover_iter = [
             s for s in self.selectedShapes if s in self._shapes_hover_order
@@ -1245,7 +1269,34 @@ class Canvas(QtWidgets.QWidget):
         if self.hShape is not None:
             self._hover_label_last_pos = pos
             self._hover_label_timer.start()
-        self.update()  # Repaint to hide label immediately
+        # Repaint only when something visible changed, and only where: plain
+        # mouse motion that leaves the highlight (and the hover label) as it
+        # was renders an identical frame, and re-rendering every shape for it
+        # is what made hovering over a shape-heavy image stutter.
+        hover_state = (self.hShape, self.hVertex, self.hEdge, self.hEdgeMidpoint)
+        if hover_state != prev_hover_state or prev_label_visible:
+            dirty: QtCore.QRectF | None = QtCore.QRectF()
+            for sh in (prev_hover_state[0], self.hShape):
+                if sh is None:
+                    continue
+                rect = self._shapeDeviceRect(sh)
+                if rect is None:  # extent unknown (mask): repaint everything
+                    dirty = None
+                    break
+                m = self._shapeDrawMargin(sh)
+                dirty = dirty.united(rect.adjusted(-m, -m, m, m))
+            if dirty is not None and prev_label_visible:
+                label_rect = self._hoverLabelDeviceRect(
+                    prev_label_shape, prev_label_pos
+                )
+                if label_rect is None:
+                    dirty = None
+                else:
+                    dirty = dirty.united(label_rect)
+            if dirty is None or dirty.isNull():
+                self.update()
+            else:
+                self.update(dirty.toAlignedRect())
 
         self.vertexSelected.emit(self.hVertex is not None)
         self._update_status(extra_messages=status_messages)
@@ -1662,9 +1713,24 @@ class Canvas(QtWidgets.QWidget):
             self.finalise()
 
     def selectShapes(self, shapes):
+        prev_selected = list(self.selectedShapes)
         self.setHiding()
         self.selectionChanged.emit(shapes)
-        self.update()
+        # Selection only changes how the affected shapes are drawn (fill and
+        # outline), so repaint just those instead of every shape.
+        if self._hideBackround or self.hideBackround:
+            self.update()  # hiding mode repaints everything anyway
+            return
+        changed = [
+            sh
+            for sh in set(prev_selected) | set(self.selectedShapes)
+            if (sh in prev_selected) != (sh in self.selectedShapes)
+        ]
+        dirty = self._shapesDeviceRect(changed) if changed else None
+        if dirty is None:
+            self.update()
+        else:
+            self.update(dirty.toAlignedRect())
 
     def selectShapePoint(self, point, multiple_selection_mode):
         """Select the first shape created which contains this point."""
@@ -2003,11 +2069,9 @@ class Canvas(QtWidgets.QWidget):
         consec_window = rule.get("consecutive_window", d["consecutive_window"])
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
-        resize_base = rule.get("resize_base", d["resize_base"])
-
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
-        scale = max(img_w, img_h) / resize_base
+        scale = self._rule_scale(rule, d["resize_base"], img_w, img_h)
         snap_window = snap_range_px * scale
         max_scan = max(int(snap_window * 3), 50)
 
@@ -2409,6 +2473,20 @@ class Canvas(QtWidgets.QWidget):
             return refined_candidates[0][0]
         return initial_peak
 
+    @staticmethod
+    def _rule_scale(rule: dict, default_resize_base, img_w: int, img_h: int) -> float:
+        """Pixel scale for a magnet rule.
+
+        Rules are normally written against a reference image whose longer
+        side is ``resize_base``, so their *_pixels values scale with the
+        actual image. ``absolute_pixels: true`` turns that off and makes
+        them plain image pixels regardless of image size.
+        """
+        if rule.get("absolute_pixels"):
+            return 1.0
+        resize_base = rule.get("resize_base", default_resize_base)
+        return max(img_w, img_h) / resize_base
+
     # -- Parallel line magnet detection defaults --
     _PL_DEFAULTS = {
         "luminance_threshold": 128,
@@ -2490,12 +2568,11 @@ class Canvas(QtWidgets.QWidget):
 
         d = self._DPM_DEFAULTS
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
-        resize_base = rule.get("resize_base", d["resize_base"])
         snap_range = rule.get("snap_range_pixels", d["snap_range_pixels"])
 
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
-        img_scale = max(img_w, img_h) / resize_base
+        img_scale = self._rule_scale(rule, d["resize_base"], img_w, img_h)
         actual_half = snap_range * img_scale / 2.0
 
         # Activation: centre-pixel bilinear check.
@@ -2627,12 +2704,11 @@ class Canvas(QtWidgets.QWidget):
         consec_window = rule.get("consecutive_window", d["consecutive_window"])
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
-        resize_base = rule.get("resize_base", d["resize_base"])
 
         M = margin
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
-        scale = max(img_w, img_h) / resize_base
+        scale = self._rule_scale(rule, d["resize_base"], img_w, img_h)
         snap_window = snap_range_px * scale
         max_scan = max(int(M * 3), 100)
 
@@ -2923,7 +2999,6 @@ class Canvas(QtWidgets.QWidget):
 
         d = self._TB_DEFAULTS
         snap_range_px = rule.get("snap_range_pixels", d["snap_range_pixels"])
-        resize_base = rule.get("resize_base", d["resize_base"])
         margin_px = rule.get("margin_pixels", d["margin_pixels"])
 
         # Determine scan direction
@@ -2939,7 +3014,7 @@ class Canvas(QtWidgets.QWidget):
         # Compute margin and snap zone from resize_base scale
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
-        scale = max(img_w, img_h) / resize_base
+        scale = self._rule_scale(rule, d["resize_base"], img_w, img_h)
         M = margin_px * scale
         snap_window = snap_range_px * scale
 
@@ -3014,7 +3089,6 @@ class Canvas(QtWidgets.QWidget):
         d = self._TB_DEFAULTS
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
         min_agreement = rule.get("min_agreement", d["min_agreement"])
-        resize_base = rule.get("resize_base", d["resize_base"])
         scan_offset_px = rule.get("scan_offset_pixels", d["scan_offset_pixels"])
 
         grayscale = self._grayscale_cache
@@ -3027,7 +3101,7 @@ class Canvas(QtWidgets.QWidget):
         bottom = max(p0.y(), p1.y())
 
         # Fixed offset at resize_base scale (independent of rectangle size)
-        scale = max(img_w, img_h) / resize_base
+        scale = self._rule_scale(rule, d["resize_base"], img_w, img_h)
         scan_offset = scan_offset_px * scale
         max_scan = int(max(right - left, bottom - top) + scan_offset)
 
@@ -3300,6 +3374,21 @@ class Canvas(QtWidgets.QWidget):
         cy = (ghost_pos.y() + offset.y()) * s
         r = self._GHOST_MARKER_RADIUS
         return QtCore.QRectF(cx - r, cy - r, 2 * r, 2 * r)
+
+    def _shapesDeviceRect(self, shapes) -> QtCore.QRectF | None:
+        """Union of the given shapes' painted bounds in widget coordinates.
+
+        Returns None when any bound is unknown (mask shapes) so callers fall
+        back to a full repaint, and for an empty sequence.
+        """
+        union = QtCore.QRectF()
+        for shape in shapes:
+            rect = self._shapeDeviceRect(shape)
+            if rect is None:
+                return None
+            m = self._shapeDrawMargin(shape)
+            union = union.united(rect.adjusted(-m, -m, m, m))
+        return None if union.isNull() else union
 
     def _vertexMoveDeviceRect(
         self, shape, index, old_point
@@ -3641,6 +3730,26 @@ class Canvas(QtWidgets.QWidget):
         """Called after hover delay; mark label as ready and repaint."""
         self._hover_label_ready = True
         self.update()
+
+    def _hoverLabelDeviceRect(self, shape, cursor_pos) -> QtCore.QRectF | None:
+        """Widget-coordinate bounds of the hover label drawn by
+        _drawHoverLabel, generously padded (it is only used to erase)."""
+        if shape is None or cursor_pos is None or not shape.label:
+            return None
+        cx = cursor_pos.x() * self.scale
+        cy = cursor_pos.y() * self.scale
+        font = self.font()
+        font.setPointSize(20)
+        fm = QtGui.QFontMetrics(font)
+        text_rect = fm.boundingRect(shape.label)
+        padding = 8
+        pad = 12.0  # slack for the rounded border and antialiasing
+        return QtCore.QRectF(
+            cx + 20 - pad,
+            cy - 40 - text_rect.height() - pad,
+            text_rect.width() + padding * 2 + 2 * pad,
+            text_rect.height() + padding * 2 + 2 * pad,
+        )
 
     def _drawHoverLabel(self, painter, shape):
         """Draw the shape's label next to the cursor (zoom-independent size)."""
