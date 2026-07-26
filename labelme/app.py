@@ -3809,6 +3809,24 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.warning("filename is None, cannot set brightness/contrast")
             return
 
+        if is_initial_load:
+            brightness, contrast = self._brightness_contrast_values.get(
+                self.filename, (None, None)
+            )
+            if self._config["keep_prev_brightness_contrast"] and self.recentFiles:
+                brightness, contrast = self._brightness_contrast_values.get(
+                    self.recentFiles[0], (None, None)
+                )
+            if brightness in (None, 50) and contrast in (None, 50):
+                # Neutral values reproduce the already-loaded pixmap exactly,
+                # so skip building the dialog: on a 4K image that pass costs a
+                # full PIL decode plus a second Canvas.loadPixmap (~700 ms).
+                self._brightness_contrast_values[self.filename] = (
+                    brightness,
+                    contrast,
+                )
+                return
+
         dialog = BrightnessContrastDialog(
             utils.img_data_to_pil(self.imageData).convert("RGB"),
             self.onNewBrightnessContrast,
@@ -5025,9 +5043,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
         # Show a progress dialog for large directories (heavy JSON scanning).
+        # Threshold is deliberately low: setMinimumDuration below keeps the
+        # dialog hidden when the scan finishes quickly anyway, so a directory
+        # that is slow for its file count still gets feedback.
         progress: QtWidgets.QProgressDialog | None = None
         total = len(filenames)
-        if total > 100:
+        if total >= 50:
             progress = QtWidgets.QProgressDialog(
                 self.tr("画像ファイルを読み込み中..."),
                 None,  # no cancel button
@@ -5061,7 +5082,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             all_labels.add(shape["label"])
                 except Exception:
                     pass
-            if progress is not None and (idx & 0x1F) == 0:
+            if progress is not None and (idx & 0x7) == 0:
                 progress.setValue(idx)
                 QtWidgets.QApplication.processEvents()
         # Add all labels to uniqLabelList in sorted order for consistent colors.
@@ -5108,7 +5129,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._initially_annotated_files.add(filename)
                 self._setFileItemAnnotated(item, is_annotated)
                 self.fileListWidget.addItem(item)
-                if progress is not None and (idx & 0x1F) == 0:
+                if progress is not None and (idx & 0x7) == 0:
                     progress.setValue(total + idx)
                     QtWidgets.QApplication.processEvents()
         finally:

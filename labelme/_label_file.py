@@ -145,7 +145,18 @@ class LabelFile:
             return
 
         # apply orientation to image according to exif
-        image_pil = utils.apply_exif_orientation(image_pil)
+        oriented_pil = utils.apply_exif_orientation(image_pil)
+
+        if oriented_pil is image_pil:
+            # No EXIF rotation to bake in: return the file bytes untouched.
+            # Decoding and re-encoding here would only cost time (~400 ms for
+            # a 4K JPEG) and, for JPEG, lose quality through recompression.
+            try:
+                with builtins.open(filename, "rb") as f:
+                    return f.read()
+            except OSError:
+                logger.error(f"Failed reading image file: {filename}")
+                return
 
         with io.BytesIO() as f:
             ext = osp.splitext(filename)[1].lower()
@@ -153,7 +164,7 @@ class LabelFile:
                 format = "JPEG"
             else:
                 format = "PNG"
-            image_pil.save(f, format=format)
+            oriented_pil.save(f, format=format)
             f.seek(0)
             return f.read()
 
