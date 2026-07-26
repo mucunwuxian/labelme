@@ -400,16 +400,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.mouseMoved.connect(self._update_status_stats)
         self.canvas.statusUpdated.connect(lambda text: self.status_left.setText(text))
         self.canvas.setParallelLineMagnetConfig(
-            self._config.get("parallel_line_magnet", [])
+            self._magnet_rules("parallel_line_magnet")
         )
         self.canvas.setTextBoundingMagnetConfig(
-            self._config.get("text_bounding_magnet", [])
+            self._magnet_rules("text_bounding_magnet")
         )
-        self.canvas.setLineFitMagnetConfig(
-            self._config.get("line_fit_magnet", [])
-        )
+        self.canvas.setLineFitMagnetConfig(self._magnet_rules("line_fit_magnet"))
         self.canvas.setDarkPixelMagnetConfig(
-            self._config.get("dark_pixel_magnet", [])
+            self._magnet_rules("dark_pixel_magnet")
         )
         self.uniqLabelList.itemSelectionChanged.connect(
             self._update_pending_draw_label
@@ -3563,12 +3561,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "canvas") and self.canvas is not None:
             self.canvas.setParallelLineDistEnabled(checked)
 
+    def _magnet_rules(self, key: str) -> list[dict]:
+        """Rules for one magnet with `magnet_defaults` filled in.
+
+        Keys shared by every magnet (absolute_pixels, resize_base, ...) can
+        be written once at the top level instead of repeating them in each
+        rule; a value set on the rule itself always wins.
+        """
+        defaults = self._config.get("magnet_defaults") or {}
+        rules = self._config.get(key) or []
+        if not defaults:
+            return rules
+        return [{**defaults, **rule} for rule in rules]
+
     def _recompute_reference_medians(self) -> None:
         if not hasattr(self, "canvas") or self.canvas is None:
             return
         medians: dict[str, float | None] = {}
         # Parallel line rules — margin from resize_base / margin_pixels
-        for i, rule in enumerate(self._config.get("parallel_line_magnet", [])):
+        for i, rule in enumerate(self._magnet_rules("parallel_line_magnet")):
             margin_px = rule.get("margin_pixels", 10)
             if self.canvas.pixmap is not None and not rule.get("absolute_pixels"):
                 resize_base = rule.get("resize_base", 2560)

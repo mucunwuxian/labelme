@@ -85,6 +85,17 @@ canvas:
     ai_mask: false
     magic_wand: false
 
+# Defaults shared by every magnet below (parallel_line / text_bounding /
+# line_fit / dark_pixel). Anything set here is applied to each of their
+# rules; a key written on the rule itself overrides it.
+# Any key a rule accepts can be shared here, e.g.:
+#   magnet_defaults:
+#     absolute_pixels: true     # *_pixels are plain image pixels
+#     snap_range_pixels: 6      # same snap zone for every magnet
+#     resize_base: 2560         # (ignored when absolute_pixels is true)
+#     luminance_threshold: 96
+magnet_defaults: {}
+
 # Parallel line magnet: rectangle edge snaps to parallel lines in the image.
 # Only active for rectangle edge midpoint drag with matching target_label.
 # Shift key cancels snap during drag.

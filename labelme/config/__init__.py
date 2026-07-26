@@ -9,13 +9,22 @@ from loguru import logger
 here = osp.dirname(osp.abspath(__file__))
 
 
+# Dicts whose contents are free-form (user-defined keys), so they are
+# replaced wholesale instead of being merged key-by-key and validated.
+_OPAQUE_DICT_KEYS = {"magnet_defaults"}
+
+
 def _update_dict(target_dict, new_dict, validate_item=None):
     for key, value in new_dict.items():
         if validate_item:
             validate_item(key, value)
         if key not in target_dict:
             raise ValueError(f"Unexpected key in config: {key}")
-        if isinstance(target_dict[key], dict) and isinstance(value, dict):
+        if (
+            isinstance(target_dict[key], dict)
+            and isinstance(value, dict)
+            and key not in _OPAQUE_DICT_KEYS
+        ):
             _update_dict(target_dict[key], value, validate_item=validate_item)
         else:
             target_dict[key] = value
