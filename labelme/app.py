@@ -2156,14 +2156,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _updateLabelListBackgrounds(self):
         """Update label list item backgrounds based on shape modification status."""
+        cleared = QtGui.QBrush()
         for row in range(self.labelList._model.rowCount()):
             item = self.labelList._model.item(row)
             if item:
                 shape = item.shape()
-                if shape and getattr(shape, 'modified_at', None):
-                    item.setBackground(QtGui.QBrush())  # Clear background
-                elif shape:
-                    item.setBackground(self.SHAPE_UNMODIFIED_COLOR)
+                if not shape:
+                    continue
+                brush = (
+                    cleared
+                    if getattr(shape, "modified_at", None)
+                    else self.SHAPE_UNMODIFIED_COLOR
+                )
+                # setBackground always emits itemChanged, which reaches
+                # labelItemChanged -> canvas.setShapeVisible -> a canvas
+                # repaint. With thousands of labels that fires on every edit,
+                # so only touch the rows that actually change.
+                if item.background() != brush:
+                    item.setBackground(brush)
 
     def setClean(self):
         self._is_changed = False

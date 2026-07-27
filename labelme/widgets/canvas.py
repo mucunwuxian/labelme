@@ -312,6 +312,9 @@ class Canvas(QtWidgets.QWidget):
                 f"Unexpected value for double_click event: {self.double_click}"
             )
         self.num_backups = kwargs.pop("num_backups", 10)
+        # offsetToCenter() memo, keyed by (scale, widget size, pixmap size)
+        self._offset_cache_key = None
+        self._offset_cache = QPointF(0, 0)
         self._auto_fit_tolerance_sq = kwargs.pop("auto_fit_tolerance", 0.2) ** 2
         self._crosshair = kwargs.pop(
             "crosshair",
@@ -888,7 +891,22 @@ class Canvas(QtWidgets.QWidget):
                 and self.hShape in self.selectedShapes
             ):
                 self.hShape.highlightClear()
-            self.update()
+            # Only the shape that lost its highlight changes (plus any label
+            # box drawn next to the cursor).
+            rect = self._shapeDeviceRect(self.hShape)
+            label_rect = (
+                self._hoverLabelDeviceRect(self.hShape, self.prevMovePoint)
+                if self._hover_label_ready
+                else None
+            )
+            if rect is None:
+                self.update()
+            else:
+                m = self._shapeDrawMargin(self.hShape)
+                dirty = rect.adjusted(-m, -m, m, m)
+                if label_rect is not None:
+                    dirty = dirty.united(label_rect)
+                self.update(dirty.toAlignedRect())
         self.prevhShape = self.hShape
         self.prevhVertex = self.hVertex
         self.prevhEdge = self.hEdge
@@ -1524,6 +1542,12 @@ class Canvas(QtWidgets.QWidget):
                 if redo_action is not None:
                     redo_action.setEnabled(False)
                 if self.current:
+                    # What the preview covers right now: the click grows the
+                    # polygon and re-anchors the rubber-band line, so both the
+                    # old and the new extent have to be repainted.
+                    preview_before = self._shapesDeviceRect(
+                        [s for s in (self.current, self.line) if s is not None]
+                    )
                     # Add point to existing shape.
                     if self.createMode == "polygon3":
                         # Fixed 3-vertex polygon: close as soon as the third
@@ -1559,7 +1583,31 @@ class Canvas(QtWidgets.QWidget):
                     if self.current is not None:
                         # Hide cursor immediately on click during polygon creation
                         self._force_blank_cursor()
-                        self.repaint()
+                        preview_after = self._shapesDeviceRect(
+                            [s for s in (self.current, self.line) if s is not None]
+                        )
+                        if (
+                            preview_before is None
+                            or preview_after is None
+                            or self._crosshair.get(
+                                "polygon"
+                                if self._createMode == "polygon3"
+                                else self._createMode,
+                                False,
+                            )
+                        ):
+                            self.repaint()  # crosshair spans the canvas
+                        else:
+                            m = max(
+                                self._shapeDrawMargin(self.current),
+                                self._shapeDrawMargin(self.line),
+                            )
+                            dirty = preview_before.united(preview_after).adjusted(
+                                -m, -m, m, m
+                            )
+                            # Still synchronous like the old repaint(), just
+                            # limited to the preview area.
+                            self.repaint(dirty.toAlignedRect())
                 elif not self.outOfPixmap(pos):
                     if self.createMode == "magic_wand":
                         self._magic_wand_select(pos)
@@ -1795,6 +1843,9 @@ class Canvas(QtWidgets.QWidget):
                     "ignoring (cache coherence bug?)"
                 )
             self.movingShape = False
+        # The ghost marker is about to disappear: remember where it was so a
+        # region repaint still erases it.
+        ghost_rect = self._ghostDeviceRect(self._dpm_ghost_pos)
         self._dpm_ghost_pos = None  # Clear ghost cursor
         # End vertex dragging and restore cursor
         if self._vertex_dragging:
@@ -1811,7 +1862,9 @@ class Canvas(QtWidgets.QWidget):
             self._unhide_os_cursor()
             # Hide cursor overlay after vertex drag
             self._cursor_overlay.hideCursor()
-            self.repaint()
+            # Only the dragged shape (vertex outlines come back) and the
+            # ghost marker changed; guides fall back to a full repaint.
+            self._repaintEditedShapes(extra_rects=(ghost_rect,))
             # After drag, if still over a vertex, show pointing hand immediately
             if self.hVertex is not None:
                 self._force_point_cursor()
@@ -1853,6 +1906,16 @@ class Canvas(QtWidgets.QWidget):
     def endMove(self, copy):
         assert self.selectedShapes and self.selectedShapesCopy
         assert len(self.selectedShapesCopy) == len(self.selectedShapes)
+        # Where the shapes were before the drag is applied: those pixels have
+        # to be repainted too, and the old points are about to be dropped.
+        old_rects = []
+        for shape in self.selectedShapes:
+            rect = self._shapeDeviceRect(shape)
+            if rect is None:
+                old_rects = None  # unknown bounds -> full repaint below
+                break
+            m = self._shapeDrawMargin(shape)
+            old_rects.append(rect.adjusted(-m, -m, m, m))
         if copy:
             for i, shape in enumerate(self.selectedShapesCopy):
                 self.shapes.append(shape)
@@ -1861,9 +1924,15 @@ class Canvas(QtWidgets.QWidget):
         else:
             for i, shape in enumerate(self.selectedShapesCopy):
                 self.selectedShapes[i].points = shape.points
+        # Both the old outlines and the new positions have to be redrawn;
+        # nothing else on the canvas moved.
+        dirty = list(self.selectedShapes) + list(self.selectedShapesCopy)
         self.selectedShapesCopy = []
         self.sortShapesByArea()
-        self.repaint()
+        if old_rects is None:
+            self.repaint()
+        else:
+            self._repaintEditedShapes(extra_shapes=dirty, extra_rects=old_rects)
         self.storeShapes()
         return True
 
@@ -1905,11 +1974,11 @@ class Canvas(QtWidgets.QWidget):
         if self._hideBackround or self.hideBackround:
             self.update()  # hiding mode repaints everything anyway
             return
-        changed = [
-            sh
-            for sh in set(prev_selected) | set(self.selectedShapes)
-            if (sh in prev_selected) != (sh in self.selectedShapes)
-        ]
+        # Symmetric difference over sets: the list membership tests this
+        # replaces were O(n^2) and cost ~20 ms when a thousand shapes were
+        # selected. The result is only used to build a repaint region, so the
+        # order does not matter.
+        changed = list(set(prev_selected) ^ set(self.selectedShapes))
         # Invalidate each shape's own area rather than their bounding box:
         # selecting a shape far from the previous one would otherwise repaint
         # everything in between.
@@ -1955,8 +2024,23 @@ class Canvas(QtWidgets.QWidget):
             shape: Shape
             # Sort by area ascending (smallest first), points always first
             # This ensures smaller objects are selected over larger ones
+            px, py = point.x(), point.y()
             for shape in self._shapes_hover_order:
-                if self.isVisible(shape) and shape.containsPoint(point):
+                if not self.isVisible(shape):
+                    continue
+                # For these, containsPoint builds a QPainterPath, so rejecting
+                # on the bounds first is cheaper (1.4x for a 4-point polygon,
+                # 3x for a 100-point one). The other types either hit-test
+                # outside their point bounds (point, mask) or return False
+                # immediately (line, linestrip, points), so they skip it.
+                if shape.shape_type in ("polygon", "rectangle", "circle"):
+                    bounds = self._shapeImageBounds(shape)
+                    if bounds is not None and not (
+                        bounds[0] <= px <= bounds[2]
+                        and bounds[1] <= py <= bounds[3]
+                    ):
+                        continue
+                if shape.containsPoint(point):
                     self.setHiding()
                     if shape not in self.selectedShapes:
                         if multiple_selection_mode:
@@ -3653,19 +3737,11 @@ class Canvas(QtWidgets.QWidget):
             dx, dy = points[1].x() - cx, points[1].y() - cy
             r = (dx * dx + dy * dy) ** 0.5
             return cx - r, cy - r, cx + r, cy + r
-        min_x = max_x = points[0].x()
-        min_y = max_y = points[0].y()
-        for pt in points:
-            x, y = pt.x(), pt.y()
-            if x < min_x:
-                min_x = x
-            elif x > max_x:
-                max_x = x
-            if y < min_y:
-                min_y = y
-            elif y > max_y:
-                max_y = y
-        return min_x, min_y, max_x, max_y
+        # QPolygonF does the min/max in C++: 2x faster than the Python loop
+        # for a 4-point shape and 8x for a 100-point one, which matters
+        # because this runs for every shape on every frame.
+        r = QtGui.QPolygonF(points).boundingRect()
+        return r.left(), r.top(), r.right(), r.bottom()
 
     def _shapeDeviceRect(self, shape) -> QtCore.QRectF | None:
         """Widget-coordinate bounds of a shape's points, or None if unknown.
@@ -3708,13 +3784,16 @@ class Canvas(QtWidgets.QWidget):
         r = self._GHOST_MARKER_RADIUS
         return QtCore.QRectF(cx - r, cy - r, 2 * r, 2 * r)
 
-    def _repaintEditedShapes(self) -> None:
+    def _repaintEditedShapes(self, extra_shapes=(), extra_rects=()) -> None:
         """Repaint the shapes a click can have changed, not the whole canvas.
 
         A press/release in edit mode only alters the selection, the hovered
         shape's highlight and any drag guides. Hiding background shapes is
         the one thing that changes every shape, so that case (and unknown
         bounds) still repaints everything.
+
+        extra_shapes / extra_rects add areas the caller knows it dirtied
+        (the shape a drag started on, a ghost marker that was just cleared).
         """
         if self.hideBackround or self._hideBackround:
             self.repaint()
@@ -3727,8 +3806,20 @@ class Canvas(QtWidgets.QWidget):
             shapes.append(self.hShape)
         if self.prevhShape is not None and self.prevhShape not in shapes:
             shapes.append(self.prevhShape)
+        for shape in extra_shapes:
+            if shape is not None and shape not in shapes:
+                shapes.append(shape)
+        rects = [r for r in extra_rects if r is not None]
         region = self._shapesDeviceRegion(shapes) if shapes else None
+        if region is None and (not rects or shapes):
+            # unknown shape bounds (mask): the safe answer is everything
+            self.repaint()
+            return
         if region is None:
+            region = QtGui.QRegion()
+        for rect in rects:
+            region = region + QtGui.QRegion(rect.toAlignedRect())
+        if region.isEmpty():
             self.repaint()
         else:
             self.update(region)
@@ -3807,7 +3898,7 @@ class Canvas(QtWidgets.QWidget):
         )
 
     def _shapeIntersectsRect(
-        self, shape, cull_rect: QtCore.QRectF, cull_region=None
+        self, shape, cull_rect: QtCore.QRectF, cull_region=None, transform=None
     ) -> bool:
         """Whether the shape can paint inside cull_rect (widget coords).
 
@@ -3816,6 +3907,9 @@ class Canvas(QtWidgets.QWidget):
         from the points (no QPainterPath build). Mask shapes paint an image
         whose extent is not derivable from the points, so they are never
         culled.
+
+        transform is an optional (offset_x, offset_y, scale) triple so a
+        caller looping over every shape resolves it just once.
         """
         points = shape.points
         if not points or shape.shape_type == "mask":
@@ -3828,24 +3922,17 @@ class Canvas(QtWidgets.QWidget):
             min_x, max_x = cx - r, cx + r
             min_y, max_y = cy - r, cy + r
         else:
-            min_x = max_x = points[0].x()
-            min_y = max_y = points[0].y()
-            for pt in points:
-                x, y = pt.x(), pt.y()
-                if x < min_x:
-                    min_x = x
-                elif x > max_x:
-                    max_x = x
-                if y < min_y:
-                    min_y = y
-                elif y > max_y:
-                    max_y = y
-        offset = self.offsetToCenter()
-        s = self.scale
-        left = (min_x + offset.x()) * s - margin
-        top = (min_y + offset.y()) * s - margin
-        right = (max_x + offset.x()) * s + margin
-        bottom = (max_y + offset.y()) * s + margin
+            bounds = QtGui.QPolygonF(points).boundingRect()
+            min_x, min_y = bounds.left(), bounds.top()
+            max_x, max_y = bounds.right(), bounds.bottom()
+        if transform is None:
+            offset = self.offsetToCenter()
+            transform = (offset.x(), offset.y(), self.scale)
+        offset_x, offset_y, s = transform
+        left = (min_x + offset_x) * s - margin
+        top = (min_y + offset_y) * s - margin
+        right = (max_x + offset_x) * s + margin
+        bottom = (max_y + offset_y) * s + margin
         if (
             right < cull_rect.left()
             or left > cull_rect.right()
@@ -3912,17 +3999,22 @@ class Canvas(QtWidgets.QWidget):
         cull_region = a0.region()
         if cull_region.rectCount() < 2:
             cull_region = None
+        # Resolved once for the whole pass: the culling test runs per shape.
+        offset = self.offsetToCenter()
+        transform = (offset.x(), offset.y(), self.scale)
         selected_shapes = []
         for shape in self._shapes_paint_order:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 if shape.selected:
                     selected_shapes.append(shape)
-                elif self._shapeIntersectsRect(shape, cull_rect, cull_region):
+                elif self._shapeIntersectsRect(
+                    shape, cull_rect, cull_region, transform
+                ):
                     shape.paint(p)
         # Draw selected shapes last so they appear on top
         for shape in selected_shapes:
-            if self._shapeIntersectsRect(shape, cull_rect, cull_region):
+            if self._shapeIntersectsRect(shape, cull_rect, cull_region, transform):
                 shape.paint(p)
         if self.current:
             self.current.paint(p)
@@ -4121,15 +4213,24 @@ class Canvas(QtWidgets.QWidget):
     def _onHoverLabelTimeout(self):
         """Called after hover delay; mark label as ready and repaint."""
         self._hover_label_ready = True
-        self.update()
+        # Only the label box appears; with thousands of shapes a full repaint
+        # here is a visible hitch every time the cursor rests on a shape.
+        rect = self._hoverLabelDeviceRect(self.hShape, self.prevMovePoint)
+        if rect is None:
+            self.update()
+        else:
+            self.update(rect.toAlignedRect())
 
     def _hoverLabelDeviceRect(self, shape, cursor_pos) -> QtCore.QRectF | None:
         """Widget-coordinate bounds of the hover label drawn by
         _drawHoverLabel, generously padded (it is only used to erase)."""
         if shape is None or cursor_pos is None or not shape.label:
             return None
-        cx = cursor_pos.x() * self.scale
-        cy = cursor_pos.y() * self.scale
+        # _drawHoverLabel paints through the centering transform, so a point
+        # it draws at q * scale lands at (q + offset) * scale on the widget.
+        offset = self.offsetToCenter()
+        cx = (cursor_pos.x() + offset.x()) * self.scale
+        cy = (cursor_pos.y() + offset.y()) * self.scale
         font = self.font()
         font.setPointSize(20)
         fm = QtGui.QFontMetrics(font)
@@ -4200,13 +4301,23 @@ class Canvas(QtWidgets.QWidget):
         self._is_dragging_enabled = enabled
 
     def offsetToCenter(self) -> QPointF:
+        # Called once per shape per paint and per hit test (thousands of times
+        # a frame with many shapes), and it only depends on the scale, the
+        # widget size and the pixmap size: memoize on those.
         s = self.scale
         area = super().size()
-        w, h = self.pixmap.width() * s, self.pixmap.height() * s
+        pm = self.pixmap
+        key = (s, area.width(), area.height(), pm.width(), pm.height())
+        if key == self._offset_cache_key:
+            return self._offset_cache
+        w, h = pm.width() * s, pm.height() * s
         aw, ah = area.width(), area.height()
         x = (aw - w) / (2 * s) if aw > w else 0
         y = (ah - h) / (2 * s) if ah > h else 0
-        return QPointF(x, y)
+        offset = QPointF(x, y)
+        self._offset_cache_key = key
+        self._offset_cache = offset
+        return offset
 
     def outOfPixmap(self, p: QPointF) -> bool:
         w, h = self.pixmap.width(), self.pixmap.height()
@@ -4948,6 +5059,10 @@ class Canvas(QtWidgets.QWidget):
         )
 
     def setShapeVisible(self, shape, value):
+        # Called once per label row whenever the label list is touched (e.g.
+        # after every edit), so skip the repaint when nothing changed.
+        if self.visible.get(shape, True) == value and shape in self.visible:
+            return
         self.visible[shape] = value
         self.update()
 

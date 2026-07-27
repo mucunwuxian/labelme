@@ -94,6 +94,16 @@ def distance(p):
 
 
 def distancetoline(point, line):
+    return sqrt(distancetoline_sq(point, line))
+
+
+def distancetoline_sq(point, line):
+    """Squared point-to-segment distance.
+
+    Callers that only compare distances (nearest edge, epsilon tests) can use
+    this and skip the square root; sqrt is monotonic so the comparisons are
+    unchanged.
+    """
     # Scalar float math (identical formulas to the previous numpy version,
     # same IEEE double precision) — this runs per edge per mouse move, and
     # numpy array construction dominated the cost at that call rate.
@@ -104,15 +114,16 @@ def distancetoline(point, line):
     dx21, dy21 = x2 - x1, y2 - y1  # p2 - p1
     dx31, dy31 = x3 - x1, y3 - y1  # p3 - p1
     if dx31 * dx21 + dy31 * dy21 < 0:  # dot(p3-p1, p2-p1)
-        return sqrt(dx31 * dx31 + dy31 * dy31)
+        return dx31 * dx31 + dy31 * dy31
     dx32, dy32 = x3 - x2, y3 - y2  # p3 - p2
     if dx32 * -dx21 + dy32 * -dy21 < 0:  # dot(p3-p2, p1-p2)
-        return sqrt(dx32 * dx32 + dy32 * dy32)
-    seg_len = sqrt(dx21 * dx21 + dy21 * dy21)
-    if seg_len == 0:
-        return sqrt(dx31 * dx31 + dy31 * dy31)
+        return dx32 * dx32 + dy32 * dy32
+    seg_len_sq = dx21 * dx21 + dy21 * dy21
+    if seg_len_sq == 0:
+        return dx31 * dx31 + dy31 * dy31
     # |cross(p2-p1, p1-p3)| = |dx21*(y1-y3) - dy21*(x1-x3)|
-    return abs(dx21 * (y1 - y3) - dy21 * (x1 - x3)) / seg_len
+    cross = dx21 * (y1 - y3) - dy21 * (x1 - x3)
+    return cross * cross / seg_len_sq
 
 
 def fmtShortcut(text):

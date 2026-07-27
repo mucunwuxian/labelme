@@ -588,27 +588,36 @@ class Shape:
                 else self.point_object_size
             )
             epsilon = max(epsilon, visual_size / 2)
-        point = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
+        # Squared distances: sqrt is monotonic, so the winner and the epsilon
+        # test are identical, and this runs for every shape on every move.
+        scale = self.scale
+        px, py = point.x() * scale, point.y() * scale
+        limit = epsilon * epsilon
+        min_distance = float("inf")
         for i, p in enumerate(self.points):
-            p = QtCore.QPointF(p.x() * self.scale, p.y() * self.scale)
-            dist = labelme.utils.distance(p - point)
-            if dist <= epsilon and dist < min_distance:
+            dx = p.x() * scale - px
+            dy = p.y() * scale - py
+            dist = dx * dx + dy * dy
+            if dist <= limit and dist < min_distance:
                 min_distance = dist
                 min_i = i
         return min_i
 
     def nearestEdge(self, point, epsilon):
+        # Squared distances (see nearestVertex): same winner, no sqrt.
         min_distance = float("inf")
         post_i = None
-        point = QtCore.QPointF(point.x() * self.scale, point.y() * self.scale)
-        for i in range(len(self.points)):
-            start = self.points[i - 1]
-            end = self.points[i]
-            start = QtCore.QPointF(start.x() * self.scale, start.y() * self.scale)
-            end = QtCore.QPointF(end.x() * self.scale, end.y() * self.scale)
-            line = [start, end]
-            dist = labelme.utils.distancetoline(point, line)
-            if dist <= epsilon and dist < min_distance:
+        scale = self.scale
+        limit = epsilon * epsilon
+        point = QtCore.QPointF(point.x() * scale, point.y() * scale)
+        points = self.points
+        end = QtCore.QPointF(points[-1].x() * scale, points[-1].y() * scale)
+        for i in range(len(points)):
+            start, end = end, QtCore.QPointF(
+                points[i].x() * scale, points[i].y() * scale
+            )
+            dist = labelme.utils.distancetoline_sq(point, (start, end))
+            if dist <= limit and dist < min_distance:
                 min_distance = dist
                 post_i = i
         return post_i

@@ -11,6 +11,7 @@ from .image import img_qt_to_arr
 from .qt import addActions
 from .qt import distance
 from .qt import distancetoline
+from .qt import distancetoline_sq
 from .qt import fmtShortcut
 from .qt import labelValidator
 from .qt import newAction
