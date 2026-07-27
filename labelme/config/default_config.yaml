@@ -116,6 +116,9 @@ rect_to_triangle_drop_corner: top_left
 #       sample_points: 11
 #       consecutive_window: 8
 #       distance_tolerance: 0.5
+#       max_tilt_degrees: 0          # 0 = parallel only; e.g. 5 accepts lines
+#                                    # tilted up to 5 deg, measuring the
+#                                    # distance at the middle of the edge
 parallel_line_magnet: []
 
 # Text bounding magnet: rectangle edge snaps to text boundaries.

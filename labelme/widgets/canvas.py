@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import math
 import os
 import ctypes
 import ctypes.util
@@ -2678,7 +2679,12 @@ class Canvas(QtWidgets.QWidget):
         return max(img_w, img_h) / resize_base
 
     # -- Parallel line magnet detection defaults --
+    # Measurement slack (degrees) added to max_tilt_degrees, see below.
+    _PL_TILT_SLACK_DEG = 1.0
     _PL_DEFAULTS = {
+        # Largest tilt (degrees) a detected line may have relative to the
+        # rectangle edge. 0 keeps the original parallel-only behaviour.
+        "max_tilt_degrees": 0.0,
         "luminance_threshold": 128,
         "sample_points": 11,
         "consecutive_window": 8,
@@ -2893,6 +2899,16 @@ class Canvas(QtWidgets.QWidget):
         dist_tol = rule.get("distance_tolerance", d["distance_tolerance"])
         lum_thresh = rule.get("luminance_threshold", d["luminance_threshold"])
 
+        max_tilt = float(rule.get("max_tilt_degrees", d["max_tilt_degrees"]))
+        # Pixel quantization makes the measured tilt drift by a few tenths of a
+        # degree, so add a small slack: a line drawn at exactly max_tilt must
+        # still be accepted.
+        max_slope = (
+            math.tan(math.radians(min(max_tilt + self._PL_TILT_SLACK_DEG, 89.0)))
+            if max_tilt > 0
+            else 0.0
+        )
+
         M = margin
         grayscale = self._grayscale_cache
         img_h, img_w = grayscale.shape
@@ -2947,7 +2963,7 @@ class Canvas(QtWidgets.QWidget):
 
             result = self._detect_line_h(
                 xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
-                consec_window, dist_tol, lum_thresh,
+                consec_window, dist_tol, lum_thresh, max_slope,
             )
             if result is not None:
                 near_edge, center = result
@@ -2977,7 +2993,7 @@ class Canvas(QtWidgets.QWidget):
 
             result = self._detect_line_v(
                 ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
-                consec_window, dist_tol, lum_thresh,
+                consec_window, dist_tol, lum_thresh, max_slope,
             )
             if result is not None:
                 near_edge, center = result
@@ -2995,8 +3011,54 @@ class Canvas(QtWidgets.QWidget):
         self._pl_snap_entered = False
         return None
 
+    @staticmethod
+    def _fit_tilted_line(coords, values, tol, max_slope, anchor):
+        """Robustly fit values = slope * coords + intercept (Theil-Sen).
+
+        Used when the detected line may be slightly tilted with respect to the
+        rectangle edge: a plain median of the per-sample distances would smear
+        such a line out, while the fit keeps it sharp and evaluates the
+        distance at ``anchor`` (the middle of the edge).
+
+        Returns ``(inlier_indices, value_at_anchor)``, or None when the line is
+        tilted by more than ``max_slope`` or too few samples agree with it.
+        """
+        n = len(coords)
+        if n < 3:
+            return None
+        slopes = []
+        for i in range(n - 1):
+            ci = coords[i]
+            vi = values[i]
+            for j in range(i + 1, n):
+                dc = coords[j] - ci
+                if dc != 0.0:
+                    slopes.append((values[j] - vi) / dc)
+        if not slopes:
+            return None
+        slope = float(np.median(slopes))
+        if abs(slope) > max_slope:
+            return None
+        intercept = float(
+            np.median([values[i] - slope * coords[i] for i in range(n)])
+        )
+        inliers = [
+            i
+            for i in range(n)
+            if abs(values[i] - (slope * coords[i] + intercept)) <= tol
+        ]
+        if not inliers:
+            return None
+        # Refit on the inliers only so a couple of outliers cannot bias the
+        # value we report at the anchor.
+        if len(inliers) < n:
+            intercept = float(
+                np.median([values[i] - slope * coords[i] for i in inliers])
+            )
+        return (inliers, slope * anchor + intercept)
+
     def _detect_line_h(self, xs, iy, scan_dir, max_scan, grayscale, img_h, img_w,
-                       consec_window, dist_tol, lum_thresh):
+                       consec_window, dist_tol, lum_thresh, max_slope=0.0):
         """Detect parallel line by scanning vertically from horizontal edge samples.
 
         Uses luminance difference from base (edge position) to detect lines.
@@ -3067,13 +3129,38 @@ class Canvas(QtWidgets.QWidget):
 
         # Slide window: cascade from strict to relaxed tolerance
         min_hits = max(w - 1, (w + 1) // 2)
+        anchor = float(np.mean(xs)) if len(xs) else 0.0
         for cur_tol in (tol * 0.5, tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
-                window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+                idxs = [i for i in range(start, end) if hits[i][0]]
+                window = [(hits[i][1], hits[i][2]) for i in idxs]
                 if len(window) < min_hits:
                     continue
                 near_positions = [ne for ne, _ in window]
+                if max_slope > 0.0:
+                    # Allow a slightly tilted line: fit it and take the
+                    # distance at the middle of the rectangle edge, so the
+                    # axis-aligned edge still gets a sensible offset.
+                    coords = [float(xs[i]) for i in idxs]
+                    fit = self._fit_tilted_line(
+                        coords, near_positions, cur_tol, max_slope, anchor
+                    )
+                    if fit is None:
+                        continue
+                    agree_idx, near_edge = fit
+                    if len(agree_idx) < min_hits:
+                        continue
+                    centers = [window[j][1] for j in agree_idx]
+                    center_fit = self._fit_tilted_line(
+                        [coords[j] for j in agree_idx], centers,
+                        cur_tol * 2.0, max_slope, anchor,
+                    )
+                    center = (
+                        center_fit[1] if center_fit is not None
+                        else float(np.median(centers))
+                    )
+                    return (float(near_edge), float(center))
                 median_near = float(np.median(near_positions))
                 agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= cur_tol]
                 if len(agree_idx) >= min_hits:
@@ -3084,7 +3171,7 @@ class Canvas(QtWidgets.QWidget):
         return None
 
     def _detect_line_v(self, ys, ix, scan_dir, max_scan, grayscale, img_h, img_w,
-                       consec_window, dist_tol, lum_thresh):
+                       consec_window, dist_tol, lum_thresh, max_slope=0.0):
         """Detect parallel line by scanning horizontally from vertical edge samples.
 
         Uses luminance difference from base (edge position) to detect lines.
@@ -3150,13 +3237,38 @@ class Canvas(QtWidgets.QWidget):
 
         # Slide window: cascade from strict to relaxed tolerance
         min_hits = max(w - 1, (w + 1) // 2)
+        anchor = float(np.mean(ys)) if len(ys) else 0.0
         for cur_tol in (tol * 0.5, tol):
             for start in range(max(n - w + 1, 1)):
                 end = min(start + w, n)
-                window = [(hits[i][1], hits[i][2]) for i in range(start, end) if hits[i][0]]
+                idxs = [i for i in range(start, end) if hits[i][0]]
+                window = [(hits[i][1], hits[i][2]) for i in idxs]
                 if len(window) < min_hits:
                     continue
                 near_positions = [ne for ne, _ in window]
+                if max_slope > 0.0:
+                    # Allow a slightly tilted line: fit it and take the
+                    # distance at the middle of the rectangle edge, so the
+                    # axis-aligned edge still gets a sensible offset.
+                    coords = [float(ys[i]) for i in idxs]
+                    fit = self._fit_tilted_line(
+                        coords, near_positions, cur_tol, max_slope, anchor
+                    )
+                    if fit is None:
+                        continue
+                    agree_idx, near_edge = fit
+                    if len(agree_idx) < min_hits:
+                        continue
+                    centers = [window[j][1] for j in agree_idx]
+                    center_fit = self._fit_tilted_line(
+                        [coords[j] for j in agree_idx], centers,
+                        cur_tol * 2.0, max_slope, anchor,
+                    )
+                    center = (
+                        center_fit[1] if center_fit is not None
+                        else float(np.median(centers))
+                    )
+                    return (float(near_edge), float(center))
                 median_near = float(np.median(near_positions))
                 agree_idx = [j for j, ne in enumerate(near_positions) if abs(ne - median_near) <= cur_tol]
                 if len(agree_idx) >= min_hits:
