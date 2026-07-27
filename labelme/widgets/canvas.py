@@ -1087,6 +1087,15 @@ class Canvas(QtWidgets.QWidget):
                 self._updateCursorOverlay()
                 return
 
+            # Keep the start-vertex highlight until the queued paint has
+            # consumed it.  Clear the previous move's transient state here,
+            # then set it again below when the latest cursor position is
+            # still close enough to the first vertex.
+            previous_line_rect = self._shapeDeviceRect(self.line)
+            previous_ghost_pos = self._dpm_ghost_pos
+            was_near_start = self._near_start_point
+            self.current.highlightClear()
+
             if self.outOfPixmap(pos):
                 # Don't allow the user to draw outside the pixmap.
                 # Project the point to the pixmap's edges.
@@ -1158,11 +1167,67 @@ class Canvas(QtWidgets.QWidget):
                 self.line.close()
             assert len(self.line.points) == len(self.line.point_labels)
             self._updateCursorOverlay()
-            # Must stay repaint() (synchronous): the NEAR_VERTEX highlight set
-            # at the snap-to-start branch above is cleared on the next line,
-            # so it is only visible if painting happens before highlightClear.
-            self.repaint()
-            self.current.highlightClear()
+            # Queue drawing rather than forcing a synchronous full-canvas
+            # repaint for every mouse event.  Qt can now coalesce high-rate
+            # mouse moves into one frame, and modes without a full-span
+            # crosshair only invalidate the old/new preview footprint.
+            full_span_crosshair = (
+                self._crosshair.get(
+                    "polygon" if self._createMode == "polygon3"
+                    else self._createMode, False
+                )
+                and self._createMode not in ("point", "polygon", "polygon3")
+            )
+            if full_span_crosshair:
+                self.update()
+            else:
+                dirty_rects = []
+                line_margin = self._shapeDrawMargin(self.line)
+                for rect in (
+                    previous_line_rect,
+                    self._shapeDeviceRect(self.line),
+                ):
+                    if rect is not None:
+                        dirty_rects.append(
+                            rect.adjusted(
+                                -line_margin,
+                                -line_margin,
+                                line_margin,
+                                line_margin,
+                            )
+                        )
+                for ghost_pos in (
+                    previous_ghost_pos,
+                    self._dpm_ghost_pos,
+                ):
+                    ghost_rect = self._ghostDeviceRect(ghost_pos)
+                    if ghost_rect is not None:
+                        dirty_rects.append(ghost_rect)
+                if was_near_start != self._near_start_point:
+                    first = self.current[0]
+                    offset = self.offsetToCenter()
+                    cx = (first.x() + offset.x()) * self.scale
+                    cy = (first.y() + offset.y()) * self.scale
+                    highlight_margin = (
+                        float(Shape.point_size) * 1.5
+                        + float(Shape.PEN_WIDTH) / 2.0
+                        + self._PAINT_MARGIN_SLACK
+                    )
+                    dirty_rects.append(
+                        QtCore.QRectF(
+                            cx - highlight_margin,
+                            cy - highlight_margin,
+                            2.0 * highlight_margin,
+                            2.0 * highlight_margin,
+                        )
+                    )
+                if dirty_rects:
+                    dirty = dirty_rects[0]
+                    for rect in dirty_rects[1:]:
+                        dirty = dirty.united(rect)
+                    self.update(dirty.toAlignedRect())
+                else:
+                    self.update()
             self._update_status()
             return
 
@@ -1176,7 +1241,13 @@ class Canvas(QtWidgets.QWidget):
                 self.boundedMoveEdge(pos)
                 self.update()
                 self.movingShape = True
-            elif self.selectedShapes and self.prevPoint is not None:
+            elif (
+                self.selectedShapes
+                and self.prevPoint is not None
+                and not (a0.modifiers() & Qt.ControlModifier)
+            ):
+                # Ctrl/Cmd is the multi-select modifier: dragging with it held
+                # is the user picking shapes, not moving them.
                 self.overrideCursor(CURSOR_MOVE)
                 before_rects = self._shapesDeviceRect(self.selectedShapes)
                 self.boundedMoveShapes(self.selectedShapes, pos)
@@ -1550,8 +1621,18 @@ class Canvas(QtWidgets.QWidget):
                 ):
                     self.removeSelectedPoint()
 
+                group_mode = int(a0.modifiers()) == Qt.ControlModifier
+                if group_mode:
+                    # Multi-select click: pick shapes only. Grabbing a vertex
+                    # or an edge here would start dragging geometry while the
+                    # user is just building up a selection.
+                    if self.hShape is not None:
+                        self.hShape.highlightClear()
+                    self.hVertex = None
+                    self.hEdgeMidpoint = None
+
                 # If no hover vertex/edge midpoint is set, resolve nearest vertex
-                if self.hVertex is None and self.hEdgeMidpoint is None:
+                if not group_mode and self.hVertex is None and self.hEdgeMidpoint is None:
                     _click_iter = [
                         s for s in self.selectedShapes
                         if s in self._shapes_hover_order
@@ -1575,7 +1656,6 @@ class Canvas(QtWidgets.QWidget):
                             shape.highlightVertex(index, shape.MOVE_VERTEX)
                             break
 
-                group_mode = int(a0.modifiers()) == Qt.ControlModifier
                 self.selectShapePoint(pos, multiple_selection_mode=group_mode)
                 self.prevPoint = pos
                 # Start vertex dragging if a vertex is selected
@@ -1594,7 +1674,7 @@ class Canvas(QtWidgets.QWidget):
                     self.prevMovePoint = pos  # Set immediately for grid line
                     self._force_blank_cursor()
                     self._updateCursorOverlay()  # Show cursor overlay immediately
-                self.repaint()
+                self._repaintEditedShapes()
         elif a0.button() == Qt.RightButton:
             if self.drawing() and not self._right_click_edit_enabled:
                 # Show context menu during drawing (undo last point, etc.)
@@ -1686,10 +1766,14 @@ class Canvas(QtWidgets.QWidget):
             self.restoreCursor()
 
         if self.movingShape and self.hShape:
+            had_guides = bool(self._auto_fit_guides) or self._snap_line_pos is not None
             self._auto_fit_snap_targets.clear()
             self._auto_fit_last_detect_pos = None
             self._autoFitClearGuides()
-            self.repaint()
+            if had_guides:
+                self.repaint()  # guides spanned the canvas: clear them all
+            else:
+                self._repaintEditedShapes()
 
             # Defensive: hShape must be in shapes (cache coherence), but a
             # stale hover reference must not crash the app mid-annotation.
@@ -1825,11 +1909,14 @@ class Canvas(QtWidgets.QWidget):
             for sh in set(prev_selected) | set(self.selectedShapes)
             if (sh in prev_selected) != (sh in self.selectedShapes)
         ]
-        dirty = self._shapesDeviceRect(changed) if changed else None
-        if dirty is None:
+        # Invalidate each shape's own area rather than their bounding box:
+        # selecting a shape far from the previous one would otherwise repaint
+        # everything in between.
+        region = self._shapesDeviceRegion(changed) if changed else None
+        if region is None:
             self.update()
         else:
-            self.update(dirty.toAlignedRect())
+            self.update(region)
 
     def selectShapePoint(self, point, multiple_selection_mode):
         """Select the first shape created which contains this point."""
@@ -1880,6 +1967,10 @@ class Canvas(QtWidgets.QWidget):
                         self.hShapeIsSelected = True
                     self.calculateOffsets(point)
                     return
+        if multiple_selection_mode:
+            # Ctrl/Cmd-clicking empty space while building a selection is a
+            # miss, not "clear everything".
+            return
         self.deSelectShape()
 
     def calculateOffsets(self, point: QPointF) -> None:
@@ -3416,12 +3507,14 @@ class Canvas(QtWidgets.QWidget):
         drawVertex centres a handle of side/diameter ``d`` on each vertex,
         so it reaches d / 2 beyond the point, plus half the outline pen.
         ``d`` is point_object_size * 1.5 for point shapes, point_size * 3
-        for the MOVE_VERTEX highlight (only the shape currently holding a
-        highlighted vertex can use it) and point_size otherwise.
+        for the MOVE_VERTEX highlight and the moving preview endpoint, and
+        point_size otherwise.
         """
         if shape is not None and shape.shape_type == "point":
             handle = float(Shape.point_object_size) * 1.5
-        elif shape is not None and shape._highlightIndex is not None:
+        elif shape is not None and (
+            shape._highlightIndex is not None or shape._is_line_preview
+        ):
             handle = float(Shape.point_size) * 3.0
         else:
             handle = float(Shape.point_size)
@@ -3503,6 +3596,48 @@ class Canvas(QtWidgets.QWidget):
         r = self._GHOST_MARKER_RADIUS
         return QtCore.QRectF(cx - r, cy - r, 2 * r, 2 * r)
 
+    def _repaintEditedShapes(self) -> None:
+        """Repaint the shapes a click can have changed, not the whole canvas.
+
+        A press/release in edit mode only alters the selection, the hovered
+        shape's highlight and any drag guides. Hiding background shapes is
+        the one thing that changes every shape, so that case (and unknown
+        bounds) still repaints everything.
+        """
+        if self.hideBackround or self._hideBackround:
+            self.repaint()
+            return
+        if self._auto_fit_guides or self._snap_line_pos is not None:
+            self.repaint()  # guides span the canvas
+            return
+        shapes = list(self.selectedShapes)
+        if self.hShape is not None and self.hShape not in shapes:
+            shapes.append(self.hShape)
+        if self.prevhShape is not None and self.prevhShape not in shapes:
+            shapes.append(self.prevhShape)
+        region = self._shapesDeviceRegion(shapes) if shapes else None
+        if region is None:
+            self.repaint()
+        else:
+            self.update(region)
+
+    def _shapesDeviceRegion(self, shapes):
+        """Region covering the given shapes, one rect each.
+
+        Returns None when any bound is unknown (mask shapes) or the region
+        would be empty, so callers fall back to a full repaint.
+        """
+        region = QtGui.QRegion()
+        for shape in shapes:
+            rect = self._shapeDeviceRect(shape)
+            if rect is None:
+                return None
+            m = self._shapeDrawMargin(shape)
+            region = region + QtGui.QRegion(
+                rect.adjusted(-m, -m, m, m).toAlignedRect()
+            )
+        return None if region.isEmpty() else region
+
     def _shapesDeviceRect(self, shapes) -> QtCore.QRectF | None:
         """Union of the given shapes' painted bounds in widget coordinates.
 
@@ -3559,7 +3694,9 @@ class Canvas(QtWidgets.QWidget):
             QtCore.QPointF((max(xs) + offset.x()) * s, (max(ys) + offset.y()) * s),
         )
 
-    def _shapeIntersectsRect(self, shape, cull_rect: QtCore.QRectF) -> bool:
+    def _shapeIntersectsRect(
+        self, shape, cull_rect: QtCore.QRectF, cull_region=None
+    ) -> bool:
         """Whether the shape can paint inside cull_rect (widget coords).
 
         Shapes draw at point * scale while the painter adds scale * offset,
@@ -3597,12 +3734,18 @@ class Canvas(QtWidgets.QWidget):
         top = (min_y + offset.y()) * s - margin
         right = (max_x + offset.x()) * s + margin
         bottom = (max_y + offset.y()) * s + margin
-        return not (
+        if (
             right < cull_rect.left()
             or left > cull_rect.right()
             or bottom < cull_rect.top()
             or top > cull_rect.bottom()
-        )
+        ):
+            return False
+        if cull_region is not None:
+            return cull_region.intersects(
+                QtCore.QRectF(left, top, right - left, bottom - top).toAlignedRect()
+            )
+        return True
 
     def paintEvent(self, a0: QtGui.QPaintEvent) -> None:
         if not self.pixmap:
@@ -3651,17 +3794,23 @@ class Canvas(QtWidgets.QWidget):
         # outside it contribute no pixels — skipping them is invisible but
         # avoids re-rendering every off-screen shape on each drag frame.
         cull_rect = QtCore.QRectF(a0.rect())
+        # When the update was requested as a region (e.g. two selected shapes
+        # far apart), a0.rect() is only its bounding box; test against the
+        # region itself so the gap between them is not repainted.
+        cull_region = a0.region()
+        if cull_region.rectCount() < 2:
+            cull_region = None
         selected_shapes = []
         for shape in self._shapes_paint_order:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 if shape.selected:
                     selected_shapes.append(shape)
-                elif self._shapeIntersectsRect(shape, cull_rect):
+                elif self._shapeIntersectsRect(shape, cull_rect, cull_region):
                     shape.paint(p)
         # Draw selected shapes last so they appear on top
         for shape in selected_shapes:
-            if self._shapeIntersectsRect(shape, cull_rect):
+            if self._shapeIntersectsRect(shape, cull_rect, cull_region):
                 shape.paint(p)
         if self.current:
             self.current.paint(p)
@@ -4385,6 +4534,10 @@ class Canvas(QtWidgets.QWidget):
 
     def finalise(self):
         assert self.current
+        # A near-start highlight is transient drawing state.  With queued
+        # paints it deliberately survives the last mouse move, so clear it
+        # before the shape becomes part of the document.
+        self.current.highlightClear()
         if self.createMode in ["ai_polygon", "ai_mask"]:
             self._update_shape_with_ai(
                 points=self.current.points,
