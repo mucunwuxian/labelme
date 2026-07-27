@@ -19,6 +19,9 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
         super().__init__(*args, **kwargs)
         self.setItemDelegate(HTMLDelegate(parent=self))
         self._colormap = None  # Will be set by app.py
+        # label -> row, so lookups do not scan the whole list. Rebuilt
+        # whenever rows shift (insertion) or the list is cleared.
+        self._row_by_label: dict[str, int] = {}
 
     def setColormap(self, colormap):
         """Set the colormap to use for label colors."""
@@ -30,11 +33,16 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
             self.clearSelection()
 
     def find_label_item(self, label: str) -> QtWidgets.QListWidgetItem | None:
-        for row in range(self.count()):
-            item = self.item(row)
-            if item and item.data(Qt.UserRole) == label:
-                return item
-        return None
+        row = self._row_by_label.get(label)
+        if row is None or row >= self.count():
+            return None
+        item = self.item(row)
+        if item is not None and item.data(Qt.UserRole) == label:
+            return item
+        # Index out of sync (rows changed elsewhere): rebuild and retry once.
+        self._rebuild_index()
+        row = self._row_by_label.get(label)
+        return self.item(row) if row is not None else None
 
     def add_label_item(self, label: str, color: tuple[int, int, int], sorted_insert: bool = False) -> None:
         if self.find_label_item(label):
@@ -57,6 +65,7 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
             self._refresh_indices()
         else:
             self.addItem(item)
+            self._row_by_label[label] = self.count() - 1
             self._update_item_text(item, self.count() - 1)
 
     def _update_item_text(self, item: QtWidgets.QListWidgetItem, index: int) -> None:
@@ -76,15 +85,30 @@ class UniqueLabelQListWidget(_EscapableQListWidget):
 
     def _refresh_indices(self) -> None:
         """Refresh all item indices after insertion."""
+        self._row_by_label = {}
         for row in range(self.count()):
             item = self.item(row)
             if item:
+                self._row_by_label[item.data(Qt.UserRole)] = row
                 self._update_item_text(item, row)
+
+    def _rebuild_index(self) -> None:
+        self._row_by_label = {}
+        for row in range(self.count()):
+            item = self.item(row)
+            if item:
+                self._row_by_label[item.data(Qt.UserRole)] = row
+
+    def clear(self) -> None:
+        super().clear()
+        self._row_by_label = {}
 
     def get_label_index(self, label: str) -> int | None:
         """Get the row index of a label."""
-        for row in range(self.count()):
+        row = self._row_by_label.get(label)
+        if row is not None and row < self.count():
             item = self.item(row)
-            if item and item.data(Qt.UserRole) == label:
+            if item is not None and item.data(Qt.UserRole) == label:
                 return row
-        return None
+        self._rebuild_index()
+        return self._row_by_label.get(label)

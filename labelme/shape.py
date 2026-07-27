@@ -84,6 +84,11 @@ class Shape:
         self.description = description
         self.other_data = {}
         self.mask = mask
+        # Rendered mask caches (image and outline), keyed by mask revision
+        self._mask_image = None
+        self._mask_image_key = None
+        self._mask_path = None
+        self._mask_path_key = None
         self.modified_at = datetime.now().isoformat()
         self._mw_preview = False  # Magic wand preview: skip vertex drawing
 
@@ -197,6 +202,77 @@ class Shape:
     def setOpen(self):
         self._closed = False
 
+    def _maskRevision(self) -> tuple:
+        """Identity of the mask as painted: content, colour and scale.
+
+        ndarrays carry no version counter, so the buffer address is combined
+        with a cheap content fingerprint (set-pixel count) to also catch
+        in-place edits of the same array. Counting is ~100x cheaper than the
+        render it guards.
+        """
+        mask = self.mask
+        return (
+            mask.shape,
+            mask.__array_interface__["data"][0],
+            int(mask.sum()),
+            self.selected,
+            self.scale,
+        )
+
+    def _maskQImage(self, fill_color):
+        """Coloured mask image at the current scale, cached per revision.
+
+        Building it used to cost ~150 ms per paint on a 1k mask (numpy ->
+        PNG encode -> QImage decode -> smooth scale); the mask only changes
+        when it is edited, so the result is reused until then.
+        """
+        key = self._maskRevision() + (tuple(fill_color),)
+        if self._mask_image_key == key and self._mask_image is not None:
+            return self._mask_image
+        h, w = self.mask.shape[:2]
+        if h == 0 or w == 0:
+            self._mask_image_key = key
+            self._mask_image = None
+            return None
+        # Wrap the RGBA buffer directly instead of round-tripping via PNG.
+        image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
+        image_to_draw[self.mask] = fill_color
+        rgba = np.ascontiguousarray(image_to_draw)
+        qimage = QtGui.QImage(
+            rgba.data, w, h, 4 * w, QtGui.QImage.Format_RGBA8888
+        ).copy()  # copy so the QImage owns its memory
+        qimage = qimage.scaled(
+            qimage.size() * self.scale,
+            QtCore.Qt.IgnoreAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+        self._mask_image_key = key
+        self._mask_image = qimage
+        return qimage
+
+    def _maskOutlinePath(self):
+        """Mask outline in scaled coordinates, cached per revision."""
+        key = self._maskRevision() + (
+            self.points[0].x() if self.points else 0.0,
+            self.points[0].y() if self.points else 0.0,
+        )
+        if self._mask_path_key == key and self._mask_path is not None:
+            return self._mask_path
+        line_path = QtGui.QPainterPath()
+        contours = skimage.measure.find_contours(np.pad(self.mask, pad_width=1))
+        for contour in contours:
+            contour += [self.points[0].y(), self.points[0].x()]
+            line_path.moveTo(
+                self._scale_point(QtCore.QPointF(contour[0, 1], contour[0, 0]))
+            )
+            for point in contour[1:]:
+                line_path.lineTo(
+                    self._scale_point(QtCore.QPointF(point[1], point[0]))
+                )
+        self._mask_path_key = key
+        self._mask_path = line_path
+        return line_path
+
     def paint(self, painter):
         if self.mask is None and not self.points:
             return
@@ -208,34 +284,15 @@ class Shape:
         painter.setPen(pen)
 
         if self.mask is not None:
-            image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
             fill_color = (
                 self.select_fill_color.getRgb()
                 if self.selected
                 else self.fill_color.getRgb()
             )
-            image_to_draw[self.mask] = fill_color
-            qimage = QtGui.QImage.fromData(labelme.utils.img_arr_to_data(image_to_draw))
-            qimage = qimage.scaled(
-                qimage.size() * self.scale,
-                QtCore.Qt.IgnoreAspectRatio,
-                QtCore.Qt.SmoothTransformation,
-            )
-
-            painter.drawImage(self._scale_point(point=self.points[0]), qimage)
-
-            line_path = QtGui.QPainterPath()
-            contours = skimage.measure.find_contours(np.pad(self.mask, pad_width=1))
-            for contour in contours:
-                contour += [self.points[0].y(), self.points[0].x()]
-                line_path.moveTo(
-                    self._scale_point(QtCore.QPointF(contour[0, 1], contour[0, 0]))
-                )
-                for point in contour[1:]:
-                    line_path.lineTo(
-                        self._scale_point(QtCore.QPointF(point[1], point[0]))
-                    )
-            painter.drawPath(line_path)
+            qimage = self._maskQImage(fill_color)
+            if qimage is not None:
+                painter.drawImage(self._scale_point(point=self.points[0]), qimage)
+            painter.drawPath(self._maskOutlinePath())
 
         if self.points:
             line_path = QtGui.QPainterPath()

@@ -544,35 +544,62 @@ class Canvas(QtWidgets.QWidget):
     def setPendingDrawLabel(self, label: str | None):
         self._pending_draw_label = label
 
-    def _ensureImageCaches(self) -> None:
-        """Build the image array / hash / grayscale caches on first use.
+    def _ensureImgArrCache(self) -> None:
+        """Pixel array (BGRA) plus an id for the image, built on first use.
 
-        Deferred from loadPixmap: identical values, just computed when a
-        feature actually needs them instead of on every file switch.
+        Used by the pixel readout and as the AI session's image id. The id
+        is QPixmap.cacheKey() rather than a hash of every byte: hashing a 4K
+        frame cost ~34 ms on each image while the key is free. A reloaded
+        image gets a new key, so an AI embedding is recomputed instead of
+        reused — correct, just occasionally slower.
         """
-        if self._image_caches_ready:
+        if self._img_arr_ready:
             return
-        self._image_caches_ready = True
+        self._img_arr_ready = True
         if self.pixmap is None or self.pixmap.isNull():
             self._pixmap_hash = None
             self._img_arr_cache = None
-            self._grayscale_cache = None
             return
         img_arr = labelme.utils.img_qt_to_arr(img_qt=self.pixmap.toImage())
-        self._pixmap_hash = hash(img_arr.tobytes())
-        # Cache image array (BGRA) for pixel info lookup
+        self._pixmap_hash = self.pixmap.cacheKey()
         self._img_arr_cache = img_arr.copy() if img_arr.ndim >= 2 else None
-        # Build grayscale cache (OpenCV BT.601: Y = 0.299R + 0.587G + 0.114B)
-        if img_arr.ndim == 3 and img_arr.shape[2] >= 3:
+
+    def _ensureGrayscaleCache(self) -> None:
+        """Luminance map for the magnets, built on first use.
+
+        Only the magnets need it, so images are never converted unless one
+        is actually active. cv2 converts a 4K frame in ~5 ms where the numpy
+        dot product took ~400 ms; it rounds to nearest instead of truncating,
+        so single levels can differ by 1 (the numpy version already varied by
+        1 with memory layout, and the magnets threshold with consensus over
+        many samples, so detection is unaffected).
+        """
+        if self._grayscale_ready:
+            return
+        self._grayscale_ready = True
+        if self.pixmap is None or self.pixmap.isNull():
+            self._grayscale_cache = None
+            return
+        self._ensureImgArrCache()
+        img_arr = self._img_arr_cache
+        if img_arr is None:
+            self._grayscale_cache = None
+        elif img_arr.ndim == 3 and img_arr.shape[2] == 4:
             # Qt ARGB32 little-endian stores as BGRA
-            self._grayscale_cache = np.dot(
-                img_arr[:, :, :3].astype(np.float32),
-                [0.114, 0.587, 0.299],
-            ).astype(np.uint8)
+            self._grayscale_cache = cv2.cvtColor(img_arr, cv2.COLOR_BGRA2GRAY)
+        elif img_arr.ndim == 3 and img_arr.shape[2] == 3:
+            self._grayscale_cache = cv2.cvtColor(
+                np.ascontiguousarray(img_arr), cv2.COLOR_BGR2GRAY
+            )
         elif img_arr.ndim == 2:
             self._grayscale_cache = img_arr.astype(np.uint8)
         else:
             self._grayscale_cache = None
+
+    def _ensureImageCaches(self) -> None:
+        """Build every image cache (array, id and luminance)."""
+        self._ensureImgArrCache()
+        self._ensureGrayscaleCache()
 
     def warmImageCaches(self) -> None:
         """Build the image caches ahead of the first interaction.
@@ -583,13 +610,21 @@ class Canvas(QtWidgets.QWidget):
         (~600 ms on a 4K image). Callers schedule this right after a load,
         once the window has been painted.
         """
-        if self._image_caches_ready or self.pixmap is None or self.pixmap.isNull():
+        if self.pixmap is None or self.pixmap.isNull():
             return
-        self._ensureImageCaches()
+        self._ensureImgArrCache()
+        if (
+            self._parallel_line_dist_enabled
+            or self._text_bounding_enabled
+            or self._line_fit_enabled
+            or self._auto_fit_enabled
+            or self._dark_pixel_magnet_enabled
+        ):
+            self._ensureGrayscaleCache()
 
     def getPixelInfo(self, pos: QPointF):
         """Return (R, G, B, Gray) at image position, or None if out of bounds."""
-        self._ensureImageCaches()
+        self._ensureImgArrCache()
         if self._img_arr_cache is None:
             return None
         x = int(round(pos.x()))
@@ -655,7 +690,7 @@ class Canvas(QtWidgets.QWidget):
     def _update_shape_with_ai(
         self, points: list[QPointF], point_labels: list[int], shape: Shape
     ) -> None:
-        self._ensureImageCaches()  # _pixmap_hash is used as the AI image id
+        self._ensureImgArrCache()  # _pixmap_hash is used as the AI image id
         image: np.ndarray = labelme.utils.img_qt_to_arr(img_qt=self.pixmap.toImage())
         response: osam.types.GenerateResponse = self._get_osam_session().run(
             image=imgviz.asrgb(image),
@@ -1910,7 +1945,7 @@ class Canvas(QtWidgets.QWidget):
         shift_held = bool(modifiers & Qt.ShiftModifier)
 
         if not shift_held:
-            self._ensureImageCaches()
+            self._ensureGrayscaleCache()
         if (
             shift_held
             or self._grayscale_cache is None
@@ -1985,7 +2020,7 @@ class Canvas(QtWidgets.QWidget):
 
         if shape.shape_type != "rectangle" or len(shape.points) != 2:
             return []
-        self._ensureImageCaches()
+        self._ensureGrayscaleCache()
         if self._grayscale_cache is None:
             return []
         pending = []  # [(edge_index, snap_pos, source), ...]
@@ -2615,7 +2650,7 @@ class Canvas(QtWidgets.QWidget):
             or label is None
         ):
             return pos
-        self._ensureImageCaches()
+        self._ensureGrayscaleCache()
         if (
             self._grayscale_cache is None
         ):
@@ -2652,21 +2687,19 @@ class Canvas(QtWidgets.QWidget):
             self._dpm_reachable_hash = self._pixmap_hash
 
         if lum_thresh not in self._dpm_reachable_cache:
-            binary = (grayscale <= lum_thresh).astype(np.float32)
-            # K=3 box conv at integer level → ±1px reach (≈ ±0.9px at sub-pixel)
-            K = 3
-            KH = 1
-            H, W = binary.shape
-            padded = np.pad(binary, KH, mode="constant", constant_values=0.0)
-            ii = np.cumsum(np.cumsum(padded, axis=0), axis=1)
-            ii = np.pad(ii, ((1, 0), (1, 0)), mode="constant")
-            conv = (
-                ii[K : H + K, K : W + K]
-                - ii[:H, K : W + K]
-                - ii[K : H + K, :W]
-                + ii[:H, :W]
+            # "any dark pixel within the 3x3 neighbourhood" (±1px reach).
+            # This used to be a 3x3 box convolution built from a float32
+            # integral image, which allocated several full-size copies and
+            # took ~0.5 s on a 4K frame; a 3x3 dilation is the same predicate
+            # and runs in milliseconds.
+            binary = (grayscale <= lum_thresh).astype(np.uint8)
+            dilated = cv2.dilate(
+                binary,
+                np.ones((3, 3), np.uint8),
+                borderType=cv2.BORDER_CONSTANT,
+                borderValue=0,
             )
-            self._dpm_reachable_cache[lum_thresh] = conv > 0.0
+            self._dpm_reachable_cache[lum_thresh] = dilated > 0
 
         reachable_full = self._dpm_reachable_cache[lum_thresh]
 
@@ -4589,7 +4622,8 @@ class Canvas(QtWidgets.QWidget):
         # magnets, the pixel readout and the AI session. Building them here
         # cost ~1 s per 4K image on every file switch even when unused, so
         # they are built on first access instead (see _ensureImageCaches).
-        self._image_caches_ready = False
+        self._img_arr_ready = False
+        self._grayscale_ready = False
         self._pixmap_hash = None
         self._img_arr_cache = None
         self._grayscale_cache = None
@@ -4785,7 +4819,8 @@ class Canvas(QtWidgets.QWidget):
         self._pixmap_hash = None
         self._img_arr_cache: np.ndarray | None = None
         self._grayscale_cache: np.ndarray | None = None
-        self._image_caches_ready = True  # empty pixmap: nothing to build
+        self._img_arr_ready = True  # empty pixmap: nothing to build
+        self._grayscale_ready = True
         self.shapes = []
         self._shapes_paint_order = []
         self._shapes_hover_order = []

@@ -3158,38 +3158,46 @@ class MainWindow(QtWidgets.QMainWindow):
         # O(n^2) pair loop (shapes are not mutated until after confirmation).
         bboxes = [_bbox(s) for s in shapes]
 
+        # Only shapes with the same label and type can be duplicates, and an
+        # IoU above 0.9 requires overlapping x ranges, so compare inside each
+        # group in x order and stop as soon as the ranges no longer touch.
+        # This turns the full O(n^2) sweep into a near-linear one.
+        groups: dict[tuple, list[int]] = {}
+        for idx, shape in enumerate(shapes):
+            groups.setdefault((shape.label, shape.shape_type), []).append(idx)
+
         to_remove: set[int] = set()
-        for i in range(len(shapes)):
-            if i in to_remove:
-                continue
-            for j in range(i + 1, len(shapes)):
-                if j in to_remove:
+        for members in groups.values():
+            members.sort(key=lambda idx: bboxes[idx][0])
+            for a, i in enumerate(members):
+                if i in to_remove:
                     continue
-                if (
-                    shapes[i].label == shapes[j].label
-                    and shapes[i].shape_type == shapes[j].shape_type
-                    and _iou(bboxes[i], bboxes[j]) > 0.9
-                ):
-                    # Keep the one with modified_at set; if both set, keep newer
-                    ts_i = shapes[i].modified_at
-                    ts_j = shapes[j].modified_at
-                    if ts_i and not ts_j:
-                        # i has timestamp, j doesn't → remove j
-                        to_remove.add(j)
-                    elif ts_j and not ts_i:
-                        # j has timestamp, i doesn't → remove i
-                        to_remove.add(i)
-                        break
-                    elif ts_i and ts_j:
-                        # Both have timestamps → remove older
-                        if ts_i < ts_j:
+                for j in members[a + 1:]:
+                    if bboxes[j][0] > bboxes[i][2]:
+                        break  # sorted by left edge: no later shape can overlap
+                    if j in to_remove:
+                        continue
+                    if _iou(bboxes[i], bboxes[j]) > 0.9:
+                        # Keep the one with modified_at set; if both set, keep newer
+                        ts_i = shapes[i].modified_at
+                        ts_j = shapes[j].modified_at
+                        if ts_i and not ts_j:
+                            # i has timestamp, j doesn't → remove j
+                            to_remove.add(j)
+                        elif ts_j and not ts_i:
+                            # j has timestamp, i doesn't → remove i
                             to_remove.add(i)
                             break
+                        elif ts_i and ts_j:
+                            # Both have timestamps → remove older
+                            if ts_i < ts_j:
+                                to_remove.add(i)
+                                break
+                            else:
+                                to_remove.add(j)
                         else:
+                            # Neither has timestamp → remove either
                             to_remove.add(j)
-                    else:
-                        # Neither has timestamp → remove either
-                        to_remove.add(j)
 
         if not to_remove:
             QtWidgets.QMessageBox.information(
