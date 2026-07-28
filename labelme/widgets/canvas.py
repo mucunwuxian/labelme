@@ -759,11 +759,13 @@ class Canvas(QtWidgets.QWidget):
         # push this right back onto the stack.
         shapesBackup = self.shapesBackups.pop()
         self.shapes = shapesBackup
-        self.sortShapesByArea()
-        self._clearStaleHoverState()
+        # Deselect before sorting: the hover order puts selected shapes first,
+        # so sorting with stale flags leaves a wrong order behind.
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
+        self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.update()
 
     def redoShape(self):
@@ -771,11 +773,13 @@ class Canvas(QtWidgets.QWidget):
             return
         shapesRedo = self.shapesRedoStack.pop()
         self.shapes = shapesRedo
-        self.sortShapesByArea()
-        self._clearStaleHoverState()
+        # Deselect before sorting: the hover order puts selected shapes first,
+        # so sorting with stale flags leaves a wrong order behind.
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
+        self.sortShapesByArea()
+        self._clearStaleHoverState()
         self.update()
 
     @property
@@ -1322,10 +1326,18 @@ class Canvas(QtWidgets.QWidget):
         )
         prev_label_shape = self._hover_label_shape
         prev_label_pos = self._hover_label_last_pos
-        # Iterate selected shapes first, then the rest (by hover order)
-        _hover_iter = [
-            s for s in self.selectedShapes if s in self._shapes_hover_order
-        ] + [s for s in self._shapes_hover_order if s not in self.selectedShapes]
+        # Iterate selected shapes first, then the rest (by hover order).
+        # Membership goes through sets: as lists this was O(shapes x selected)
+        # on every mouse move (4000 x 1000 comparisons in a heavy scene).
+        _hover_order = self._shapes_hover_order
+        if not self.selectedShapes:
+            _hover_iter = _hover_order  # nothing to move to the front
+        else:
+            _order_set = set(_hover_order)
+            _selected_set = set(self.selectedShapes)
+            _hover_iter = [s for s in self.selectedShapes if s in _order_set] + [
+                s for s in _hover_order if s not in _selected_set
+            ]
         # Widest reach of the hit tests below, in image units: the edge
         # midpoint capsule (epsilon * 4) and the point-shape handle are the
         # largest, and shapes are stored in image coordinates while epsilon
@@ -1486,25 +1498,55 @@ class Canvas(QtWidgets.QWidget):
         point = self.prevMovePoint
         if shape is None or index is None or point is None:
             return
+        before_region = self._shapesDeviceRegion([shape])
         shape.insertPoint(index, point)
         shape.touch()  # Update modification timestamp
+        # Highlight first: the new vertex draws a MOVE_VERTEX handle, which is
+        # three times the usual size, and the invalidated area has to include it.
         shape.highlightVertex(index, shape.MOVE_VERTEX)
         self.hShape = shape
         self.hVertex = index
         self.hEdge = None
         self.movingShape = True
+        self.markShapeGeometryChanged(shape)
+        self.flushShapeOrder()
+        self._invalidateShapeChange(shape, before_region)
 
-    def removeSelectedPoint(self):
+    def removeSelectedPoint(self) -> bool:
+        """Delete the hovered vertex. Returns whether anything was removed.
+
+        The removal is a complete edit on its own: after it, every hover index
+        refers to a vertex that no longer exists (or to a different one), so
+        they are all dropped and the caller must not continue into the normal
+        press handling.
+        """
         shape = self.prevhShape
         index = self.prevhVertex
-        if shape is None or index is None:
-            return
+        if shape is None or index is None or not shape.canRemovePoint():
+            return False
+        # Removing an outer vertex shrinks the shape: the edges and handles it
+        # used to draw are outside its new bounds, so remember the old area.
+        before_region = self._shapesDeviceRegion([shape])
         shape.removePoint(index)
         shape.touch()  # Update modification timestamp
         shape.highlightClear()
-        self.hShape = shape
+        # Indices after a topology change cannot be trusted.
+        self.hShape = None
+        self.prevhShape = None
+        self.hVertex = None
         self.prevhVertex = None
-        self.movingShape = True  # Save changes
+        self.hEdge = None
+        self.prevhEdge = None
+        self.hEdgeMidpoint = None
+        self.prevhEdgeMidpoint = None
+        self.markShapeGeometryChanged(shape)
+        self.flushShapeOrder()
+        self._invalidateShapeChange(shape, before_region)
+        # No drag follows, so close the edit here instead of on release.
+        self.storeShapes()
+        self.shapeMoved.emit()
+        self.vertexSelected.emit(False)
+        return True
 
     def mousePressEvent(self, a0: QtGui.QMouseEvent) -> None:
         self._mouse_pressed = True
@@ -1668,7 +1710,11 @@ class Canvas(QtWidgets.QWidget):
                 elif self.selectedVertex() and a0.modifiers() == (
                     Qt.AltModifier | Qt.ShiftModifier
                 ):
-                    self.removeSelectedPoint()
+                    if self.removeSelectedPoint():
+                        # Falling through would latch whichever vertex now sits
+                        # at the removed index and drag it with the next move.
+                        self._update_status()
+                        return
 
                 group_mode = int(a0.modifiers()) == Qt.ControlModifier
                 if group_mode:
@@ -1682,13 +1728,17 @@ class Canvas(QtWidgets.QWidget):
 
                 # If no hover vertex/edge midpoint is set, resolve nearest vertex
                 if not group_mode and self.hVertex is None and self.hEdgeMidpoint is None:
-                    _click_iter = [
-                        s for s in self.selectedShapes
-                        if s in self._shapes_hover_order
-                    ] + [
-                        s for s in self._shapes_hover_order
-                        if s not in self.selectedShapes
-                    ]
+                    # Same order as before, with set membership (see the
+                    # hover iteration in mouseMoveEvent).
+                    _hover_order = self._shapes_hover_order
+                    if not self.selectedShapes:
+                        _click_iter = _hover_order
+                    else:
+                        _order_set = set(_hover_order)
+                        _selected_set = set(self.selectedShapes)
+                        _click_iter = [
+                            s for s in self.selectedShapes if s in _order_set
+                        ] + [s for s in _hover_order if s not in _selected_set]
                     for shape in _click_iter:
                         if not self.isVisible(shape):
                             continue
@@ -1899,6 +1949,9 @@ class Canvas(QtWidgets.QWidget):
             # After drag, if still over an edge midpoint, show pointing hand
             if self.hEdgeMidpoint is not None:
                 self._force_point_cursor()
+        # A drag can have resized a shape; re-sort once for the gesture
+        # rather than on every mouse move.
+        self.flushShapeOrder()
         if self._cursor_debug:
             self._log_cursor_state(f"mouseReleaseEvent:{a0.button()}:after")
         self._update_status()
@@ -2102,6 +2155,7 @@ class Canvas(QtWidgets.QWidget):
             )
 
         self.hShape.moveVertexBy(i=self.hVertex, offset=pos - point)
+        self.markShapeGeometryChanged(self.hShape)
 
     def boundedMoveEdge(self, pos: QPointF) -> None:
         """Move a rectangle edge to resize the rectangle."""
@@ -2128,6 +2182,7 @@ class Canvas(QtWidgets.QWidget):
             or self.hShape.shape_type != "rectangle"
         ):
             self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+            self.markShapeGeometryChanged(self.hShape)
             return
 
         # Parallel line snap: try each rule in order
@@ -2183,6 +2238,7 @@ class Canvas(QtWidgets.QWidget):
         # (else: parallel line snap active or text bounding disabled — skip)
 
         self.hShape.moveEdgeTo(self.hEdgeMidpoint, snap_pos)
+        self.markShapeGeometryChanged(self.hShape)
 
     def _autoFitDetect(self, shape):
         """Detect auto-fit snap positions for all edges (preview only, no shape change).
@@ -2304,8 +2360,10 @@ class Canvas(QtWidgets.QWidget):
         for edge_idx, (_src, target) in self._auto_fit_snap_targets.items():
             if edge_idx in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
                 shape.moveEdgeTo(edge_idx, QPointF(0, target))
+                self.markShapeGeometryChanged(shape)
             else:
                 shape.moveEdgeTo(edge_idx, QPointF(target, 0))
+                self.markShapeGeometryChanged(shape)
 
     def _autoFitClearGuides(self):
         """Clear auto-fit visual feedback."""
@@ -5007,6 +5065,9 @@ class Canvas(QtWidgets.QWidget):
             self.shapes = []
             self._shapes_paint_order = []
             self._shapes_hover_order = []
+            self._shapes_area_order = []
+            self._area_order_dirty = False
+            self._area_dirty_shapes = {}
         # Reset prevMovePoint to avoid out-of-bounds cursor position from previous image
         self.prevMovePoint = None
         self._cursor_overlay.hideCursor()
@@ -5027,11 +5088,13 @@ class Canvas(QtWidgets.QWidget):
         self._clearStaleHoverState()  # also drops stale prevh* references
         self.update()
 
-    def sortShapesByArea(self):
+    def sortShapesByArea(self, changed_shapes=None):
         """Rebuild cached sort orders for painting and hover detection."""
         # boundingRect() builds a QPainterPath per call; the two sort keys
         # used to invoke it 4x per shape. Compute each area exactly once,
         # straight from the points (identical values, no path build).
+        self._area_order_dirty = False
+        self._area_dirty_shapes = {}
         areas: dict[int, float] = {}
         for s in self.shapes:
             bounds = self._shapeImageBounds(s)
@@ -5041,6 +5104,7 @@ class Canvas(QtWidgets.QWidget):
                 min_x, min_y, max_x, max_y = bounds
                 areas[id(s)] = (max_x - min_x) * (max_y - min_y)
         # Paint order: largest first, points on top (drawn last)
+        previous_paint_order = self._shapes_paint_order
         self._shapes_paint_order = sorted(
             self.shapes,
             key=lambda s: (
@@ -5048,15 +5112,86 @@ class Canvas(QtWidgets.QWidget):
                 -areas[id(s)],
             ),
         )
-        # Hover order: selected first, then smallest first, points first
-        self._shapes_hover_order = sorted(
+        # Hover order without the selection key: smallest first, points first.
+        # Stably partitioning this by "selected" reproduces the full sort, so
+        # a selection change does not have to recompute any area.
+        self._shapes_area_order = sorted(
             self.shapes,
             key=lambda s: (
-                0 if s.selected else 1,
                 0 if s.shape_type == "point" else 1,
                 areas[id(s)],
             ),
         )
+        self.updateSelectionOrder()
+        # Resizing a shape can change how it stacks against other shapes, and
+        # those pixels are outside whatever region the caller is about to
+        # invalidate. Only the shapes whose area changed move within the
+        # order, so if the caller named them the difference is confined to
+        # their own bounds; otherwise repaint everything.
+        if previous_paint_order != self._shapes_paint_order:
+            region = (
+                self._shapesDeviceRegion(changed_shapes) if changed_shapes else None
+            )
+            if region is None:
+                self.update()
+            else:
+                self.update(region)
+
+    def _invalidateShapeChange(self, shape, before_region) -> None:
+        """Repaint a shape's old and new areas after an edit resized it.
+
+        Regions rather than rects: each side carries the draw margin that
+        applied to it, so a highlight that appears or disappears with the edit
+        is covered on both sides.
+        """
+        after_region = self._shapesDeviceRegion([shape])
+        if before_region is None or after_region is None:
+            self.update()  # unknown extent (mask): repaint everything
+            return
+        self.update(before_region.united(after_region))
+
+    def markShapeGeometryChanged(self, shape=None):
+        """An edit may have changed a shape's area: the cached orders are stale.
+
+        Resizing is continuous (a drag emits one of these per mouse move), so
+        the actual re-sort is deferred to flushShapeOrder() at the end of the
+        operation instead of running per frame. Passing the edited shape lets
+        the re-sort repaint only its area (see sortShapesByArea).
+        """
+        self._area_order_dirty = True
+        if shape is None:
+            self._area_dirty_shapes = None  # unknown: assume anything moved
+        elif self._area_dirty_shapes is not None:
+            # A drag marks the same shape on every mouse move; keep one entry
+            # so the release does not recompute its region dozens of times.
+            self._area_dirty_shapes[id(shape)] = shape
+
+    def flushShapeOrder(self):
+        """Re-sort if a geometry edit marked the cached orders stale."""
+        if self._area_order_dirty:
+            self.sortShapesByArea(
+                changed_shapes=(
+                    None
+                    if self._area_dirty_shapes is None
+                    else list(self._area_dirty_shapes.values())
+                )
+            )
+
+    def updateSelectionOrder(self):
+        """Refresh the hover order after a selection change only.
+
+        Hover order is (selected first, points first, smallest first) and the
+        cached area order already carries the last two keys, so a stable
+        partition is equivalent to re-sorting - without touching any point.
+        """
+        order = self._shapes_area_order
+        selected = [s for s in order if s.selected]
+        if not selected:
+            self._shapes_hover_order = list(order)
+        else:
+            self._shapes_hover_order = selected + [
+                s for s in order if not s.selected
+            ]
 
     def setShapeVisible(self, shape, value):
         # Called once per label row whenever the label list is touched (e.g.
@@ -5204,6 +5339,9 @@ class Canvas(QtWidgets.QWidget):
         self.shapes = []
         self._shapes_paint_order = []
         self._shapes_hover_order = []
+        self._shapes_area_order = []
+        self._area_order_dirty = False
+        self._area_dirty_shapes = {}
         self.shapesBackups = []
         self.shapesRedoStack = []
         self._undone_points = []

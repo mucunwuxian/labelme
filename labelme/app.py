@@ -139,6 +139,9 @@ class _FileListItemDelegate(QtWidgets.QStyledItemDelegate):
 class MainWindow(QtWidgets.QMainWindow):
     _config_file: Path | None
     _config: dict
+    # True while we mirror a canvas selection into the label list; the class
+    # default keeps the guard valid before __init__ sets it.
+    _syncing_label_selection = False
 
     # File list background color: blue, alpha gradient by mtime (oldest=20, newest=70)
     FILE_COLOR_RGB = (30, 136, 229)
@@ -259,6 +262,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flag_dock.setWidget(self.flag_widget)
         self.flag_widget.itemChanged.connect(self.setDirty)
 
+        # Set while we push a selection into the label list ourselves, so the
+        # handler below ignores the echo (see shapeSelectionChanged).
+        self._syncing_label_selection = False
         self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
         self.labelList.itemDoubleClicked.connect(self._edit_label)
         self.labelList.itemChanged.connect(self.labelItemChanged)
@@ -2591,19 +2597,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # React to canvas signals.
     def shapeSelectionChanged(self, selected_shapes):
-        self.labelList.itemSelectionChanged.disconnect(self._label_selection_changed)
+        # A flag rather than disconnecting the signal: a nested call would
+        # disconnect twice and raise, and the flag also survives re-entry
+        # through any other emitter. Pushing our own selection into the label
+        # list is what triggers re-entry, so the nested request is an echo of
+        # the selection we are already applying: drop it. (Re-applying it
+        # instead would let two handlers that each ask for the other's shape
+        # spin this loop forever on the GUI thread.)
+        if self._syncing_label_selection:
+            logger.debug("ignoring re-entrant shape selection change")
+            return
+        self._syncing_label_selection = True
+        try:
+            self._apply_shape_selection(list(selected_shapes))
+        finally:
+            self._syncing_label_selection = False
+
+    def _apply_shape_selection(self, selected_shapes):
+        # Clear every previous flag and set every new one, exactly as before:
+        # a shape whose flag drifted out of sync gets repaired.
         for shape in self.canvas.selectedShapes:
             shape.selected = False
-        self.labelList.clearSelection()
         self.canvas.selectedShapes = selected_shapes
-        for shape in self.canvas.selectedShapes:
+        for shape in selected_shapes:
             shape.selected = True
-            item = self.labelList.findItemByShape(shape)
-            if item is not None:
-                self.labelList.selectItem(item)
+        # One pass over the rows instead of a full scan per shape
+        # (findItemByShape was O(rows) inside a loop over the selection).
+        by_shape = self.labelList.itemsByShape()
+        items = [
+            by_shape[id(shape)]
+            for shape in selected_shapes
+            if id(shape) in by_shape
+        ]
+        self.labelList.selectOnlyItems(items)
+        # Scroll to each item in order, as before, but repaint the list once
+        # at the end instead of after every step. Restore whatever the update
+        # state was, in case a caller had it disabled.
+        updates_were_enabled = self.labelList.updatesEnabled()
+        self.labelList.setUpdatesEnabled(False)
+        try:
+            for item in items:
                 self.labelList.scrollToItem(item)
-        self.labelList.itemSelectionChanged.connect(self._label_selection_changed)
-        self.canvas.sortShapesByArea()
+        finally:
+            self.labelList.setUpdatesEnabled(updates_were_enabled)
+        # Only the selection changed, so the hover order can be re-derived
+        # from the cached area order instead of measuring every shape again.
+        self.canvas.updateSelectionOrder()
         n_selected = len(selected_shapes)
         self.actions.delete.setEnabled(n_selected)
         self.actions.duplicate.setEnabled(n_selected)
@@ -3296,6 +3335,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _label_selection_changed(self) -> None:
+        if self._syncing_label_selection:
+            return  # our own selection sync, not the user picking a row
         selected_shapes: list[Shape] = []
         for item in self.labelList.selectedItems():
             selected_shapes.append(item.shape())
@@ -5020,15 +5061,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("ポリゴンの頂点を3点未満にはできません。"),
             )
             return
+        # The canvas repaints the vertex's old and new area itself, and emits
+        # shapeMoved (-> setDirty) when it actually removed something. It also
+        # refuses to empty a shape (canRemovePoint), so there is no
+        # "shape ran out of points" case to clean up here.
         self.canvas.removeSelectedPoint()
-        self.canvas.update()
-        if self.canvas.hShape and not self.canvas.hShape.points:
-            self.canvas.deleteShape(self.canvas.hShape)
-            self.remLabels([self.canvas.hShape])
-            if self.noShapes():
-                for action in self.on_shapes_present_actions:
-                    action.setEnabled(False)
-        self.setDirty()
 
     def deleteSelectedShape(self):
         if not self.skipDeleteConfirmCheckbox.isChecked():

@@ -187,6 +187,31 @@ class LabelListWidget(QtWidgets.QListView):
         index = self._model.indexFromItem(item)
         self.selectionModel().select(index, QtCore.QItemSelectionModel.Select)
 
+    def selectOnlyItems(self, items):
+        """Select exactly these items with a single selection change.
+
+        Same end state as clearSelection() followed by selectItem() for each,
+        but it does not emit one selection change per item, which is what made
+        selecting thousands of shapes slow.
+        """
+        selection = QtCore.QItemSelection()
+        for item in items:
+            index = self._model.indexFromItem(item)
+            if index.isValid():
+                selection.select(index, index)
+        self.selectionModel().select(
+            selection, QtCore.QItemSelectionModel.ClearAndSelect
+        )
+
+    def itemsByShape(self):
+        """shape id -> item, built in one pass (findItemByShape is a scan)."""
+        by_shape = {}
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row, 0)
+            if item is not None:
+                by_shape.setdefault(id(item.shape()), item)
+        return by_shape
+
     def findItemByShape(self, shape):
         for row in range(self._model.rowCount()):
             item = self._model.item(row, 0)
