@@ -1,5 +1,3 @@
-from typing import cast
-
 from PyQt5 import QtCore
 from PyQt5 import QtGui
 from PyQt5 import QtWidgets
@@ -97,9 +95,13 @@ class LabelListWidgetItem(QtGui.QStandardItem):
 class _ItemModel(QtGui.QStandardItemModel):
     itemDropped = QtCore.pyqtSignal()
 
-    def removeRows(self, *args, **kwargs):
+    def removeRows(self, *args, emit_item_dropped=True, **kwargs):
         ret = super().removeRows(*args, **kwargs)
-        self.itemDropped.emit()
+        # Deleting rows on purpose is not a reorder: callers can suppress the
+        # notification without blocking the model's own signals, which the
+        # shape index depends on.
+        if ret and emit_item_dropped:
+            self.itemDropped.emit()
         return ret
 
     def dropMimeData(self, data, action, row: int, column: int, parent):
@@ -140,6 +142,21 @@ class LabelListWidget(QtWidgets.QListView):
 
         self.doubleClicked.connect(self.itemDoubleClickedEvent)
         self.selectionModel().selectionChanged.connect(self.itemSelectionChangedEvent)
+
+        # shape id -> item, rebuilt lazily. Every model change drops it, so a
+        # row added or removed behind this widget's back cannot go unnoticed.
+        self._shape_index: dict | None = None
+        for signal in (
+            self._model.rowsInserted,
+            self._model.rowsRemoved,
+            self._model.rowsMoved,
+            self._model.modelReset,
+            self._model.layoutChanged,
+        ):
+            signal.connect(self._invalidateShapeIndex)
+        # Text and colour changes leave the shape mapping intact; only the
+        # role that stores the shape matters here.
+        self._model.dataChanged.connect(self._onShapeDataChanged)
 
     def __len__(self):
         return self._model.rowCount()
@@ -183,6 +200,18 @@ class LabelListWidget(QtWidgets.QListView):
         index = self._model.indexFromItem(item)
         self._model.removeRows(index.row(), 1)
 
+    def removeItems(self, items, *, emit_item_dropped=True):
+        """Remove several rows, resolving them all before any row moves."""
+        rows = set()
+        for item in items:
+            if item is None:
+                continue
+            index = self._model.indexFromItem(item)
+            if index.isValid():
+                rows.add(index.row())
+        for row in sorted(rows, reverse=True):
+            self._model.removeRows(row, 1, emit_item_dropped=emit_item_dropped)
+
     def selectItem(self, item):
         index = self._model.indexFromItem(item)
         self.selectionModel().select(index, QtCore.QItemSelectionModel.Select)
@@ -203,22 +232,29 @@ class LabelListWidget(QtWidgets.QListView):
             selection, QtCore.QItemSelectionModel.ClearAndSelect
         )
 
+    def _invalidateShapeIndex(self, *args):
+        self._shape_index = None
+
+    def _onShapeDataChanged(self, _first, _last, roles=()):
+        if not roles or Qt.UserRole in roles:
+            self._invalidateShapeIndex()
+
     def itemsByShape(self):
-        """shape id -> item, built in one pass (findItemByShape is a scan)."""
-        by_shape = {}
-        for row in range(self._model.rowCount()):
-            item = self._model.item(row, 0)
-            if item is not None:
-                by_shape.setdefault(id(item.shape()), item)
-        return by_shape
+        """shape id -> item (cached; findItemByShape is a scan per call).
+
+        The returned dict belongs to the widget: treat it as read-only.
+        """
+        if self._shape_index is None:
+            by_shape = {}
+            for row in range(self._model.rowCount()):
+                item = self._model.item(row, 0)
+                if item is not None:
+                    by_shape.setdefault(item.shape(), item)
+            self._shape_index = by_shape
+        return self._shape_index
 
     def findItemByShape(self, shape):
-        for row in range(self._model.rowCount()):
-            item = self._model.item(row, 0)
-            item = cast(LabelListWidgetItem, item)
-            if item.shape() == shape:
-                return item
-        return None
+        return self.itemsByShape().get(shape)
 
     def clear(self):
         self._model.clear()

@@ -398,10 +398,14 @@ class Shape:
                 color = self.select_fill_color if self.selected else self.fill_color
                 painter.fillPath(line_path, color)
 
-            pen.setColor(QtGui.QColor(255, 0, 0, 255))
-            painter.setPen(pen)
-            painter.fillPath(negative_vrtx_path, QtGui.QColor(255, 0, 0, 255))
-            painter.drawPath(negative_vrtx_path)
+            # Only "points" shapes ever add to this path, so for everything
+            # else these two calls draw nothing - and they run for every shape
+            # on every frame.
+            if not negative_vrtx_path.isEmpty():
+                pen.setColor(QtGui.QColor(255, 0, 0, 255))
+                painter.setPen(pen)
+                painter.fillPath(negative_vrtx_path, QtGui.QColor(255, 0, 0, 255))
+                painter.drawPath(negative_vrtx_path)
 
 
     def drawVertex(self, path, i):

@@ -312,6 +312,11 @@ class Canvas(QtWidgets.QWidget):
                 f"Unexpected value for double_click event: {self.double_click}"
             )
         self.num_backups = kwargs.pop("num_backups", 10)
+        # Device bounds of the shapes that are standing still, valid only for
+        # the duration of one drag (see beginDragBoundsCache).
+        self._drag_bounds_cache = None
+        self._drag_bounds_transform = None
+        self._drag_moving_shapes = frozenset()
         # offsetToCenter() memo, keyed by (scale, widget size, pixmap size)
         self._offset_cache_key = None
         self._offset_cache = QPointF(0, 0)
@@ -747,6 +752,7 @@ class Canvas(QtWidgets.QWidget):
             self.prevhEdgeMidpoint = None
 
     def restoreShape(self):
+        self.endDragBoundsCache()
         # This does _part_ of the job of restoring shapes.
         # The complete process is also done in app.py::undoShapeEdit
         # and app.py::loadShapes and our own Canvas::loadShapes function.
@@ -769,6 +775,7 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def redoShape(self):
+        self.endDragBoundsCache()
         if not self.isShapeRedoable:
             return
         shapesRedo = self.shapesRedoStack.pop()
@@ -1261,8 +1268,16 @@ class Canvas(QtWidgets.QWidget):
                 if self._edge_midpoint_dragging:
                     self._force_blank_cursor()
                     self.prevMovePoint = pos  # Update for grid line drawing
+                # The guide lines span the canvas but are only a few pixels
+                # thick: repaint their bands plus the rectangle, not the whole
+                # canvas (which costs ~0.7 s with thousands of shapes).
+                before = self._edgeDragDeviceRegion()
                 self.boundedMoveEdge(pos)
-                self.update()
+                after = self._edgeDragDeviceRegion()
+                if before is None or after is None:
+                    self.update()
+                else:
+                    self.update(before.united(after))
                 self.movingShape = True
             elif (
                 self.selectedShapes
@@ -1272,7 +1287,11 @@ class Canvas(QtWidgets.QWidget):
                 # Ctrl/Cmd is the multi-select modifier: dragging with it held
                 # is the user picking shapes, not moving them.
                 self.overrideCursor(CURSOR_MOVE)
-                before_rects = self._shapesDeviceRect(self.selectedShapes)
+                if self._drag_bounds_cache is None:
+                    self.beginDragBoundsCache(self.selectedShapes)
+                # The auto-fit dots and the "N lines fit" label move with the
+                # drag, so they belong in the dirty region too.
+                before_rects = self._dragDeviceRegion(self.selectedShapes)
                 self.boundedMoveShapes(self.selectedShapes, pos)
                 if (
                     self._auto_fit_enabled
@@ -1298,16 +1317,14 @@ class Canvas(QtWidgets.QWidget):
                 # areas instead of the whole canvas. Fall back to a full
                 # update when auto-fit guides are on screen (they span the
                 # canvas) or when a bound cannot be derived.
-                after_rects = self._shapesDeviceRect(self.selectedShapes)
-                if (
-                    before_rects is not None
-                    and after_rects is not None
-                    and not self._auto_fit_guides
-                    and self._snap_line_pos is None
-                ):
-                    self.update(before_rects.united(after_rects).toAlignedRect())
-                else:
+                after_rects = self._dragDeviceRegion(self.selectedShapes)
+                if before_rects is None or after_rects is None:
                     self.update()
+                else:
+                    # One rect per shape plus the guide bands (the guides no
+                    # longer force a full repaint): dragging shapes that are
+                    # far apart must not repaint everything between them.
+                    self.update(before_rects.united(after_rects))
                 self.movingShape = True
             return
 
@@ -1466,7 +1483,10 @@ class Canvas(QtWidgets.QWidget):
         # is what made hovering over a shape-heavy image stutter.
         hover_state = (self.hShape, self.hVertex, self.hEdge, self.hEdgeMidpoint)
         if hover_state != prev_hover_state or prev_label_visible:
-            dirty: QtCore.QRectF | None = QtCore.QRectF()
+            # A region, not the union rectangle: the shape the cursor left
+            # and the one it entered can be at opposite corners, and their
+            # bounding box would be the whole canvas.
+            dirty: QtGui.QRegion | None = QtGui.QRegion()
             for sh in (prev_hover_state[0], self.hShape):
                 if sh is None:
                     continue
@@ -1475,7 +1495,9 @@ class Canvas(QtWidgets.QWidget):
                     dirty = None
                     break
                 m = self._shapeDrawMargin(sh)
-                dirty = dirty.united(rect.adjusted(-m, -m, m, m))
+                dirty = dirty + QtGui.QRegion(
+                    rect.adjusted(-m, -m, m, m).toAlignedRect()
+                )
             if dirty is not None and prev_label_visible:
                 label_rect = self._hoverLabelDeviceRect(
                     prev_label_shape, prev_label_pos
@@ -1483,11 +1505,11 @@ class Canvas(QtWidgets.QWidget):
                 if label_rect is None:
                     dirty = None
                 else:
-                    dirty = dirty.united(label_rect)
-            if dirty is None or dirty.isNull():
+                    dirty = dirty + QtGui.QRegion(label_rect.toAlignedRect())
+            if dirty is None or dirty.isEmpty():
                 self.update()
             else:
-                self.update(dirty.toAlignedRect())
+                self.update(dirty)
 
         self.vertexSelected.emit(self.hVertex is not None)
         self._update_status(extra_messages=status_messages)
@@ -1739,8 +1761,16 @@ class Canvas(QtWidgets.QWidget):
                         _click_iter = [
                             s for s in self.selectedShapes if s in _order_set
                         ] + [s for s in _hover_order if s not in _selected_set]
+                    # nearestVertex walks every point of every shape; reject
+                    # the ones that cannot reach the click first. Same bound
+                    # as the hover pass: point shapes widen epsilon to their
+                    # handle size, so take the largest of the two.
                     for shape in _click_iter:
                         if not self.isVisible(shape):
+                            continue
+                        if len(shape.points) >= 8 and not (
+                            self._shapeMayHaveVertexAt(shape, pos)
+                        ):
                             continue
                         index = shape.nearestVertex(pos, self.epsilon)
                         if index is not None:
@@ -1760,6 +1790,7 @@ class Canvas(QtWidgets.QWidget):
                 # Start vertex dragging if a vertex is selected
                 if self.hVertex is not None:
                     self._vertex_dragging = True
+                    self.beginDragBoundsCache([self.hShape])
                     Shape.hide_vertex_outline = True  # Hide vertex outline during drag
                     self.prevMovePoint = pos  # Set immediately for crosshair
                     self._force_blank_cursor()
@@ -1767,6 +1798,7 @@ class Canvas(QtWidgets.QWidget):
                 # Start edge midpoint dragging if an edge midpoint is selected
                 elif self.hEdgeMidpoint is not None:
                     self._edge_midpoint_dragging = True
+                    self.beginDragBoundsCache([self.hShape])
                     self._dragging_edge_index = self.hEdgeMidpoint
                     self._edge_midpoint_drag_shape = self.hShape  # Track shape for flag restore
                     self.hShape._hide_edge_midpoint = True  # Hide edge midpoint during drag
@@ -1857,7 +1889,7 @@ class Canvas(QtWidgets.QWidget):
                     and self.hShapeIsSelected
                     and not self.movingShape
                 ):
-                    self.selectionChanged.emit(
+                    self._requestShapeSelection(
                         [x for x in self.selectedShapes if x != self.hShape]
                     )
         elif a0.button() == Qt.MiddleButton:
@@ -1865,14 +1897,28 @@ class Canvas(QtWidgets.QWidget):
             self.restoreCursor()
 
         if self.movingShape and self.hShape:
-            had_guides = bool(self._auto_fit_guides) or self._snap_line_pos is not None
+            # The guides (and the auto-fit dots and counter) are about to be
+            # cleared: their bands have to be repainted to erase them, but
+            # the rest of the canvas does not.
+            # The vertex and edge branches below repaint their own (smaller)
+            # areas, so only a whole-shape move needs this one.
+            generic_repaint = not (
+                self._vertex_dragging or self._edge_midpoint_dragging
+            )
+            guides_before = (
+                self._dragDeviceRegion(self.selectedShapes)
+                if generic_repaint
+                else None
+            )
             self._auto_fit_snap_targets.clear()
             self._auto_fit_last_detect_pos = None
             self._autoFitClearGuides()
-            if had_guides:
-                self.repaint()  # guides spanned the canvas: clear them all
-            else:
-                self._repaintEditedShapes()
+            if generic_repaint:
+                guides_after = self._dragDeviceRegion(self.selectedShapes)
+                if guides_before is None or guides_after is None:
+                    self.repaint()
+                else:
+                    self.update(guides_before.united(guides_after))
 
             # Defensive: hShape must be in shapes (cache coherence), but a
             # stale hover reference must not crash the app mid-annotation.
@@ -1920,6 +1966,9 @@ class Canvas(QtWidgets.QWidget):
                 self._force_point_cursor()
         # End edge midpoint dragging and restore cursor
         if self._edge_midpoint_dragging:
+            # Captured before the guides are cleared: their bands have to be
+            # repainted to erase them.
+            edge_dirty = self._edgeDragDeviceRegion()
             if self.hShape:
                 self.hShape.touch()  # Update modification timestamp
             # Restore edge midpoint on the shape that started the drag
@@ -1945,10 +1994,17 @@ class Canvas(QtWidgets.QWidget):
             self.unsetCursor()
             self._clear_parent_viewport_cursor()
             self._unhide_os_cursor()
-            self.repaint()
+            after_dirty = self._edgeDragDeviceRegion()
+            if edge_dirty is None or after_dirty is None:
+                self.repaint()
+            else:
+                # Synchronous like before, but only the guide bands and the
+                # rectangle - not every shape on the canvas.
+                self.repaint(edge_dirty.united(after_dirty))
             # After drag, if still over an edge midpoint, show pointing hand
             if self.hEdgeMidpoint is not None:
                 self._force_point_cursor()
+        self.endDragBoundsCache()
         # A drag can have resized a shape; re-sort once for the gesture
         # rather than on every mouse move.
         self.flushShapeOrder()
@@ -2018,28 +2074,43 @@ class Canvas(QtWidgets.QWidget):
         if self.canCloseShape():
             self.finalise()
 
-    def selectShapes(self, shapes):
-        prev_selected = list(self.selectedShapes)
-        self.setHiding()
-        self.selectionChanged.emit(shapes)
-        # Selection only changes how the affected shapes are drawn (fill and
-        # outline), so repaint just those instead of every shape.
+    def _requestShapeSelection(self, shapes) -> None:
+        """Ask for a new selection and repaint exactly what it changes.
+
+        Every selection change in this widget goes through here: emitting the
+        signal on its own leaves the shapes that were deselected drawn with
+        their selection fill, because nothing invalidates their area.
+        """
+        requested = list(shapes)
+        previous = list(self.selectedShapes)
+        watched = set(previous) | set(requested)
+        flags_before = {shape: shape.selected for shape in watched}
+
+        self.setHiding(bool(requested))
+        # MainWindow's handler updates selectedShapes and the flags.
+        self.selectionChanged.emit(requested)
+
         if self._hideBackround or self.hideBackround:
             self.update()  # hiding mode repaints everything anyway
             return
-        # Symmetric difference over sets: the list membership tests this
-        # replaces were O(n^2) and cost ~20 ms when a thousand shapes were
-        # selected. The result is only used to build a repaint region, so the
-        # order does not matter.
-        changed = list(set(prev_selected) ^ set(self.selectedShapes))
-        # Invalidate each shape's own area rather than their bounding box:
-        # selecting a shape far from the previous one would otherwise repaint
-        # everything in between.
-        region = self._shapesDeviceRegion(changed) if changed else None
+        changed = set(previous) ^ set(self.selectedShapes)
+        changed.update(
+            shape
+            for shape, was_selected in flags_before.items()
+            if shape.selected != was_selected
+        )
+        if not changed:
+            return
+        # Each shape's own area, not their bounding box: selecting a shape far
+        # from the previous one would otherwise repaint everything between.
+        region = self._shapesDeviceRegion(changed)
         if region is None:
             self.update()
         else:
             self.update(region)
+
+    def selectShapes(self, shapes):
+        self._requestShapeSelection(shapes)
 
     def selectShapePoint(self, point, multiple_selection_mode):
         """Select the first shape created which contains this point."""
@@ -2050,9 +2121,9 @@ class Canvas(QtWidgets.QWidget):
             # Select the shape when clicking on its vertex
             if self.hShape not in self.selectedShapes:
                 if multiple_selection_mode:
-                    self.selectionChanged.emit(self.selectedShapes + [self.hShape])
+                    self._requestShapeSelection(self.selectedShapes + [self.hShape])
                 else:
-                    self.selectionChanged.emit([self.hShape])
+                    self._requestShapeSelection([self.hShape])
                 self.hShapeIsSelected = False
             else:
                 self.hShapeIsSelected = True
@@ -2065,9 +2136,9 @@ class Canvas(QtWidgets.QWidget):
             self.setHiding()
             if self.hShape not in self.selectedShapes:
                 if multiple_selection_mode:
-                    self.selectionChanged.emit(self.selectedShapes + [self.hShape])
+                    self._requestShapeSelection(self.selectedShapes + [self.hShape])
                 else:
-                    self.selectionChanged.emit([self.hShape])
+                    self._requestShapeSelection([self.hShape])
                 self.hShapeIsSelected = False
             else:
                 self.hShapeIsSelected = True
@@ -2097,9 +2168,11 @@ class Canvas(QtWidgets.QWidget):
                     self.setHiding()
                     if shape not in self.selectedShapes:
                         if multiple_selection_mode:
-                            self.selectionChanged.emit(self.selectedShapes + [shape])
+                            self._requestShapeSelection(
+                                self.selectedShapes + [shape]
+                            )
                         else:
-                            self.selectionChanged.emit([shape])
+                            self._requestShapeSelection([shape])
                         self.hShapeIsSelected = False
                     else:
                         self.hShapeIsSelected = True
@@ -3690,6 +3763,7 @@ class Canvas(QtWidgets.QWidget):
         return list(zip(refined_x.tolist(), rows[valid].astype(float).tolist()))
 
     def boundedMoveShapes(self, shapes, pos):
+        self._invalidateDragBoundsForMutation(shapes)
         if self.outOfPixmap(pos):
             return False  # No need to move
         o1 = pos + self.offsets[0]
@@ -3718,10 +3792,8 @@ class Canvas(QtWidgets.QWidget):
         if self.selectedShapes:
             for shape in self.selectedShapes:
                 shape.highlightClear()
-            self.setHiding(False)
-            self.selectionChanged.emit([])
+            self._requestShapeSelection([])
             self.hShapeIsSelected = False
-            self.update()
 
     def deleteSelected(self):
         deleted_shapes = []
@@ -3737,6 +3809,7 @@ class Canvas(QtWidgets.QWidget):
         return deleted_shapes
 
     def deleteShape(self, shape):
+        self.endDragBoundsCache()
         if shape in self.selectedShapes:
             self.selectedShapes.remove(shape)
         if shape in self.shapes:
@@ -3955,6 +4028,36 @@ class Canvas(QtWidgets.QWidget):
             QtCore.QPointF((max(xs) + offset.x()) * s, (max(ys) + offset.y()) * s),
         )
 
+    def _shapeMayHaveVertexAt(self, shape, pos) -> bool:
+        """Whether nearestVertex could possibly hit this shape.
+
+        Uses the same epsilon and the same scale nearestVertex does, so it can
+        only reject shapes that would have missed anyway. Small shapes skip
+        the test: computing their bounds costs more than scanning their points.
+        """
+        if len(shape.points) < 8:
+            # Scanning a handful of points is cheaper than bounding them.
+            return True
+        bounds = self._shapeImageBounds(shape)
+        if bounds is None:
+            return True
+        epsilon = self.epsilon
+        if shape.shape_type == "point":
+            size = (
+                shape.point_object_size * 1.5
+                if shape.selected
+                else shape.point_object_size
+            )
+            epsilon = max(epsilon, size / 2)
+        reach = epsilon / max(abs(float(shape.scale)), 1e-9)
+        x, y = pos.x(), pos.y()
+        return not (
+            x < bounds[0] - reach
+            or x > bounds[2] + reach
+            or y < bounds[1] - reach
+            or y > bounds[3] + reach
+        )
+
     def _shapeIntersectsRect(
         self, shape, cull_rect: QtCore.QRectF, cull_region=None, transform=None
     ) -> bool:
@@ -3972,6 +4075,30 @@ class Canvas(QtWidgets.QWidget):
         points = shape.points
         if not points or shape.shape_type == "mask":
             return True
+        cache = self._drag_bounds_cache
+        if cache is not None:
+            cached = cache.get(shape)
+            if cached is not None:
+                margin = self._shapeDrawMargin(shape)
+                left, top, right, bottom = cached
+                left -= margin
+                top -= margin
+                right += margin
+                bottom += margin
+                if (
+                    right < cull_rect.left()
+                    or left > cull_rect.right()
+                    or bottom < cull_rect.top()
+                    or top > cull_rect.bottom()
+                ):
+                    return False
+                if cull_region is not None:
+                    return cull_region.intersects(
+                        QtCore.QRectF(
+                            left, top, right - left, bottom - top
+                        ).toAlignedRect()
+                    )
+                return True
         margin = self._shapeDrawMargin(shape)
         if shape.shape_type == "circle" and len(points) == 2:
             cx, cy = points[0].x(), points[0].y()
@@ -3991,6 +4118,14 @@ class Canvas(QtWidgets.QWidget):
         top = (min_y + offset_y) * s - margin
         right = (max_x + offset_x) * s + margin
         bottom = (max_y + offset_y) * s + margin
+        if cache is not None and shape not in self._drag_moving_shapes:
+            # Geometry only: the draw margin depends on the highlight state,
+            # which can change while the drag runs. Only the dragged shapes
+            # change geometry between frames, and the cache is dropped when
+            # the drag ends.
+            cache[shape] = (
+                left + margin, top + margin, right - margin, bottom - margin,
+            )
         if (
             right < cull_rect.left()
             or left > cull_rect.right()
@@ -4047,6 +4182,7 @@ class Canvas(QtWidgets.QWidget):
             )
 
         Shape.scale = self.scale
+        self._checkDragBoundsCache()
         # Qt clips painting to the event region, so shapes that fall entirely
         # outside it contribute no pixels — skipping them is invisible but
         # avoids re-rendering every off-screen shape on each drag frame.
@@ -5051,6 +5187,7 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def loadPixmap(self, pixmap, clear_shapes=True):
+        self.endDragBoundsCache()
         self.pixmap = pixmap
         # The image array / hash / grayscale caches are only needed by the
         # magnets, the pixel readout and the AI session. Building them here
@@ -5074,6 +5211,7 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def loadShapes(self, shapes, replace=True):
+        self.endDragBoundsCache()
         if replace:
             self.shapes = list(shapes)
         else:
@@ -5093,6 +5231,7 @@ class Canvas(QtWidgets.QWidget):
         # boundingRect() builds a QPainterPath per call; the two sort keys
         # used to invoke it 4x per shape. Compute each area exactly once,
         # straight from the points (identical values, no path build).
+        self.endDragBoundsCache()
         self._area_order_dirty = False
         self._area_dirty_shapes = {}
         areas: dict[int, float] = {}
@@ -5137,6 +5276,124 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self.update(region)
 
+    # Half-thickness added around a guide line / dot when invalidating it:
+    # the widest guide pen is 4 px, dots are r=3, plus antialiasing slack.
+    _GUIDE_BAND_HALF = 8.0
+
+    def _overlayDeviceRegion(self):
+        """Region covering the guides painted on top of the shapes.
+
+        These are the canvas-wide lines and markers drawn after the shapes
+        (edge grid line, snap guides, auto-fit guides and dots, the auto-fit
+        count label, the magnet ghost). Returns None when something with
+        unknown bounds is showing, so callers fall back to a full repaint.
+        """
+        s = self.scale
+        offset = self.offsetToCenter()
+        ox, oy = offset.x() * s, offset.y() * s
+        w, h = self.width(), self.height()
+        half = self._GUIDE_BAND_HALF
+        region = QtGui.QRegion()
+
+        def add_rect(x, y, rw, rh):
+            nonlocal region
+            region = region + QtGui.QRegion(
+                QtCore.QRectF(x, y, rw, rh).toAlignedRect()
+            )
+
+        def h_band(image_y):
+            add_rect(0, image_y * s + oy - half, w, 2 * half)
+
+        def v_band(image_x):
+            add_rect(image_x * s + ox - half, 0, 2 * half, h)
+
+        def dot(dx, dy):
+            add_rect(
+                (dx + 0.5) * s + ox - half,
+                (dy + 0.5) * s + oy - half,
+                2 * half,
+                2 * half,
+            )
+
+        # Grid line along the rectangle edge being dragged
+        if (
+            self._edge_midpoint_dragging
+            and self.hShape is not None
+            and len(self.hShape.points) == 2
+        ):
+            p0, p1 = self.hShape.points[0], self.hShape.points[1]
+            if self._dragging_edge_index == Shape.EDGE_TOP:
+                h_band(min(p0.y(), p1.y()))
+            elif self._dragging_edge_index == Shape.EDGE_BOTTOM:
+                h_band(max(p0.y(), p1.y()))
+            elif self._dragging_edge_index == Shape.EDGE_LEFT:
+                v_band(min(p0.x(), p1.x()))
+            elif self._dragging_edge_index == Shape.EDGE_RIGHT:
+                v_band(max(p0.x(), p1.x()))
+
+        # Parallel-line snap guide
+        if (
+            self._snap_active
+            and self._snap_line_pos is not None
+            and self._edge_midpoint_dragging
+        ):
+            if self._dragging_edge_index in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                h_band(self._snap_line_pos)
+            elif self._dragging_edge_index in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+                v_band(self._snap_line_pos)
+
+        if self._text_bounding_snap_dots and self._edge_midpoint_dragging:
+            for dx, dy in self._text_bounding_snap_dots:
+                dot(dx, dy)
+
+        for edge_idx, line_pos in self._auto_fit_guides:
+            if edge_idx in (Shape.EDGE_TOP, Shape.EDGE_BOTTOM):
+                h_band(line_pos)
+            elif edge_idx in (Shape.EDGE_LEFT, Shape.EDGE_RIGHT):
+                v_band(line_pos)
+
+        for dx, dy in self._auto_fit_dots:
+            dot(dx, dy)
+
+        # "N lines fit" label, drawn to the left of the cursor
+        if self._auto_fit_count > 0 and self.prevPoint is not None:
+            cx = self.prevPoint.x() * s + ox
+            cy = self.prevPoint.y() * s + oy
+            add_rect(cx - 260, cy - 60, 280, 120)
+
+        if self._dpm_ghost_pos is not None:
+            ghost = self._ghostDeviceRect(self._dpm_ghost_pos)
+            if ghost is None:
+                return None
+            add_rect(
+                ghost.x() - half, ghost.y() - half,
+                ghost.width() + 2 * half, ghost.height() + 2 * half,
+            )
+        return region
+
+    def _dragDeviceRegion(self, shapes):
+        """Guides plus the given shapes, or None if any extent is unknown."""
+        region = self._overlayDeviceRegion()
+        if region is None:
+            return None
+        shapes = list(dict.fromkeys(s for s in shapes if s is not None))
+        if not shapes:
+            return region
+        shape_region = self._shapesDeviceRegion(shapes)
+        if shape_region is None:
+            return None
+        return region.united(shape_region)
+
+    def _edgeDragDeviceRegion(self):
+        """Everything an edge-midpoint drag frame can paint: shape + guides.
+
+        Only the rectangle being resized moves, so the rest of the selection
+        does not belong here (and scanning it was quadratic).
+        """
+        return self._dragDeviceRegion(
+            [self.hShape, self._edge_midpoint_drag_shape]
+        )
+
     def _invalidateShapeChange(self, shape, before_region) -> None:
         """Repaint a shape's old and new areas after an edit resized it.
 
@@ -5150,6 +5407,43 @@ class Canvas(QtWidgets.QWidget):
             return
         self.update(before_region.united(after_region))
 
+    def beginDragBoundsCache(self, moving_shapes) -> None:
+        """Start caching the bounds of every shape that is not being dragged.
+
+        Between press and release only ``moving_shapes`` change shape, so the
+        others' device bounds can be computed once instead of on every frame.
+        The cache is dropped on release and whenever the view transform moves,
+        so it cannot outlive what it describes.
+        """
+        self._drag_moving_shapes = frozenset(
+            s for s in moving_shapes if s is not None
+        )
+        self._drag_bounds_cache = {}
+        offset = self.offsetToCenter()
+        self._drag_bounds_transform = (offset.x(), offset.y(), self.scale)
+
+    def _invalidateDragBoundsForMutation(self, shapes=None) -> None:
+        """Drop the cache when a shape outside the drag set changes."""
+        if self._drag_bounds_cache is None:
+            return
+        if shapes is None or any(
+            shape not in self._drag_moving_shapes for shape in shapes
+        ):
+            self.endDragBoundsCache()
+
+    def endDragBoundsCache(self) -> None:
+        self._drag_bounds_cache = None
+        self._drag_bounds_transform = None
+        self._drag_moving_shapes = frozenset()
+
+    def _checkDragBoundsCache(self) -> None:
+        """Drop the cache when zoom or centering moved under it."""
+        if self._drag_bounds_cache is None:
+            return
+        offset = self.offsetToCenter()
+        if (offset.x(), offset.y(), self.scale) != self._drag_bounds_transform:
+            self.endDragBoundsCache()
+
     def markShapeGeometryChanged(self, shape=None):
         """An edit may have changed a shape's area: the cached orders are stale.
 
@@ -5158,6 +5452,7 @@ class Canvas(QtWidgets.QWidget):
         operation instead of running per frame. Passing the edited shape lets
         the re-sort repaint only its area (see sortShapesByArea).
         """
+        self._invalidateDragBoundsForMutation(None if shape is None else [shape])
         self._area_order_dirty = True
         if shape is None:
             self._area_dirty_shapes = None  # unknown: assume anything moved
@@ -5325,6 +5620,7 @@ class Canvas(QtWidgets.QWidget):
         )
 
     def resetState(self):
+        self.endDragBoundsCache()
         self._close_mw_panel()
         self._mw_active = False
         self._mw_contour = None

@@ -142,6 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # True while we mirror a canvas selection into the label list; the class
     # default keeps the guard valid before __init__ sets it.
     _syncing_label_selection = False
+    _dock_refresh_pending = False
 
     # File list background color: blue, alpha gradient by mtime (oldest=20, newest=70)
     FILE_COLOR_RGB = (30, 136, 229)
@@ -2156,9 +2157,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_changed = True
         self.actions.save.setEnabled(True)
         self.setWindowTitle(self._get_window_title(dirty=True))
+        # The docks redraw every shape; with thousands of them that is the
+        # pause felt when letting go of the mouse. Coalesce it to one update
+        # once the interaction is over instead of one per edit.
+        self._scheduleDockShapeRefresh()
+        self._updateLabelListBackgrounds()
+
+    def _scheduleDockShapeRefresh(self) -> None:
+        if self._dock_refresh_pending:
+            return
+        self._dock_refresh_pending = True
+        QtCore.QTimer.singleShot(0, self._refreshDockShapes)
+
+    def _refreshDockShapes(self) -> None:
+        self._dock_refresh_pending = False
         self.navigator.setShapes(self.canvas.shapes)
         self.update_distribution.setShapes(self.canvas.shapes)
-        self._updateLabelListBackgrounds()
 
     def _updateLabelListBackgrounds(self):
         """Update label list item backgrounds based on shape modification status."""
@@ -2625,9 +2639,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # (findItemByShape was O(rows) inside a loop over the selection).
         by_shape = self.labelList.itemsByShape()
         items = [
-            by_shape[id(shape)]
-            for shape in selected_shapes
-            if id(shape) in by_shape
+            by_shape[shape] for shape in selected_shapes if shape in by_shape
         ]
         self.labelList.selectOnlyItems(items)
         # Scroll to each item in order, as before, but repaint the list once
@@ -2824,17 +2836,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
 
     def remLabels(self, shapes):
-        # Removing rows from LabelList also triggers model-level signals used for
-        # drag/drop reordering. During explicit delete, suppress those signals so
-        # we don't treat deletion as a reorder and push duplicate undo snapshots.
-        blocker = QtCore.QSignalBlocker(self.labelList.model())
+        # An explicit delete is not a drag/drop reorder, so the reorder
+        # notification is suppressed - but only that one. Blocking the model's
+        # own signals would leave the label list's shape index pointing at
+        # deleted rows.
+        by_shape = self.labelList.itemsByShape()
+        items = [by_shape.get(shape) for shape in shapes]
+        was_syncing = self._syncing_label_selection
+        self._syncing_label_selection = True
         try:
-            for shape in shapes:
-                item = self.labelList.findItemByShape(shape)
-                if item is not None:
-                    self.labelList.removeItem(item)
+            self.labelList.removeItems(items, emit_item_dropped=False)
         finally:
-            del blocker
+            self._syncing_label_selection = was_syncing
 
     def _load_shapes(self, shapes: list[Shape], replace: bool = True) -> None:
         self.labelList.itemSelectionChanged.disconnect(self._label_selection_changed)
@@ -3631,9 +3644,8 @@ class MainWindow(QtWidgets.QMainWindow):
         h_ratio = clipped_h / img_h
 
         self.navigator.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
-        self.navigator.setShapes(self.canvas.shapes)
         self.update_distribution.setViewportRect(x_ratio, y_ratio, w_ratio, h_ratio)
-        self.update_distribution.setShapes(self.canvas.shapes)
+        self._refreshDockShapes()
 
     def _onNavigatorViewportChange(self, x_ratio: float, y_ratio: float):
         """Handle click on navigator to move viewport center."""
