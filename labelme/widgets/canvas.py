@@ -317,6 +317,9 @@ class Canvas(QtWidgets.QWidget):
         self._drag_bounds_cache = None
         self._drag_bounds_transform = None
         self._drag_moving_shapes = frozenset()
+        # Per-image scale for the parallel-line magnet's margin: 1.0 uses the
+        # distance from the config as-is, 0.5 halves it, 2.0 doubles it.
+        self._parallel_line_margin_ratio = 1.0
         # offsetToCenter() memo, keyed by (scale, widget size, pixmap size)
         self._offset_cache_key = None
         self._offset_cache = QPointF(0, 0)
@@ -525,6 +528,14 @@ class Canvas(QtWidgets.QWidget):
 
     def setTextBoundingEnabled(self, enabled: bool):
         self._text_bounding_enabled = enabled
+
+    def setParallelLineMarginRatio(self, ratio: float):
+        """Scale the parallel-line magnet's distance for this image."""
+        self._parallel_line_margin_ratio = max(0.01, float(ratio))
+        self._pl_snap_cache = None
+
+    def parallelLineMarginRatio(self) -> float:
+        return self._parallel_line_margin_ratio
 
     def setParallelLineMagnetConfig(self, config: list[dict]):
         self._parallel_line_magnet_config = config
@@ -2266,6 +2277,7 @@ class Canvas(QtWidgets.QWidget):
                 margin = self._reference_medians.get(f"pl:{i}")
                 if margin is None:
                     continue
+                margin *= self._parallel_line_margin_ratio
                 result = self._detect_parallel_line_snap(
                     rule, margin, self.hShape, self.hEdgeMidpoint, pos,
                 )

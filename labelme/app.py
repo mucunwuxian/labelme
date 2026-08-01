@@ -142,6 +142,10 @@ class MainWindow(QtWidgets.QMainWindow):
     # True while we mirror a canvas selection into the label list; the class
     # default keeps the guard valid before __init__ sets it.
     _syncing_label_selection = False
+    _applying_image_settings = False
+    # Per-image parallel-line magnet distance, in percent of the configured one
+    PARALLEL_MARGIN_KEY = "parallel_line_margin_percent"
+    PARALLEL_MARGIN_DEFAULT = 100
     _dock_refresh_pending = False
 
     # File list background color: blue, alpha gradient by mtime (oldest=20, newest=70)
@@ -355,6 +359,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vertexSizeWidget.setSuffix(" px")
         self.vertexSizeWidget.valueChanged.connect(self._vertex_size_changed)
         self.vertexSizeWidget.setValue(8)
+
+        # Parallel-line magnet distance, as a percentage of the configured
+        # value. Saved per image in its JSON.
+        self.parallelMarginWidget = QtWidgets.QSpinBox()
+        self.parallelMarginWidget.setRange(10, 300)
+        self.parallelMarginWidget.setSingleStep(10)
+        self.parallelMarginWidget.setSuffix(" %")
+        self.parallelMarginWidget.valueChanged.connect(
+            self._parallel_margin_changed
+        )
+        self.parallelMarginWidget.setValue(self.PARALLEL_MARGIN_DEFAULT)
 
         self.storeImageDataCheckbox = QtWidgets.QCheckBox()
         self.storeImageDataCheckbox.toggled.connect(self._store_image_data_toggled)
@@ -848,6 +863,12 @@ class MainWindow(QtWidgets.QMainWindow):
             checkable=True,
             checked=True,
         )
+        showParallelMargin = action(
+            self.tr("平行直線との距離調整割合"),
+            self._toggle_parallel_margin_visible,
+            checkable=True,
+            checked=True,
+        )
         undoLastPoint = action(
             self.tr("Undo last point"),
             self.canvas.undoLastPoint,
@@ -1115,6 +1136,17 @@ class MainWindow(QtWidgets.QMainWindow):
         vertexSize.setDefaultWidget(QtWidgets.QWidget())
         vertexSize.defaultWidget().setLayout(vertexSizeBoxLayout)
         self._vertexSizeAction = vertexSize
+
+        # Parallel-line distance ratio widget
+        parallelMargin = QtWidgets.QWidgetAction(self)
+        parallelMarginBoxLayout = QtWidgets.QVBoxLayout()
+        parallelMarginLabel = QtWidgets.QLabel(self.tr("平行直線との\n距離調整割合"))
+        parallelMarginLabel.setAlignment(Qt.AlignCenter)
+        parallelMarginBoxLayout.addWidget(parallelMarginLabel)
+        parallelMarginBoxLayout.addWidget(self.parallelMarginWidget)
+        parallelMargin.setDefaultWidget(QtWidgets.QWidget())
+        parallelMargin.defaultWidget().setLayout(parallelMarginBoxLayout)
+        self._parallelMarginAction = parallelMargin
 
         # Save image data (base64) in JSON checkbox widget
         storeImageData = QtWidgets.QWidgetAction(self)
@@ -1453,6 +1485,7 @@ class MainWindow(QtWidgets.QMainWindow):
             showLineWidth=showLineWidth,
             showPointObjectSize=showPointObjectSize,
             showVertexSize=showVertexSize,
+            showParallelMargin=showParallelMargin,
             rectToTriangle=rectToTriangle,
             showRectToTriangle=showRectToTriangle,
             showDeleteAllShapes=showDeleteAllShapes,
@@ -1617,6 +1650,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 showLineWidth,
                 showPointObjectSize,
                 showVertexSize,
+                showParallelMargin,
                 None,
                 showStoreImageData,
                 showLineFit,
@@ -1692,6 +1726,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     lineWidth,
                     pointObjectSize,
                     vertexSize,
+                    parallelMargin,
                     None,
                     customCursor,
                     rightClickEdit,
@@ -1821,6 +1856,8 @@ class MainWindow(QtWidgets.QMainWindow):
              self._toggle_point_object_size_visible),
             ("view/showVertexSize", "showVertexSize",
              self._toggle_vertex_size_visible),
+            ("view/showParallelMargin", "showParallelMargin",
+             self._toggle_parallel_margin_visible),
         ):
             visible = self.settings.value(key, True, type=bool)
             getattr(self.actions, action_).setChecked(visible)
@@ -3939,6 +3976,48 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_vertexSizeAction"):
             self._vertexSizeAction.setVisible(checked)
 
+    def _parallel_margin_visible(self) -> bool:
+        """Whether the ratio control is switched on in the View menu."""
+        action_ = getattr(getattr(self, "actions", None), "showParallelMargin", None)
+        return bool(action_.isChecked()) if action_ is not None else False
+
+    def _toggle_parallel_margin_visible(self, checked: bool) -> None:
+        if hasattr(self, "_parallelMarginAction"):
+            self._parallelMarginAction.setVisible(checked)
+
+    def _parallel_margin_changed(self, value: int) -> None:
+        """Scale the parallel-line magnet distance for the current image."""
+        if hasattr(self, "canvas") and self.canvas is not None:
+            self.canvas.setParallelLineMarginRatio(value / 100.0)
+        if self._applying_image_settings:
+            return  # loading a file, not a user edit
+        if not self._parallel_margin_visible():
+            return  # the control is switched off: do not write it into the JSON
+        if getattr(self, "_other_data", None) is None:
+            self._other_data = {}
+        if value == self.PARALLEL_MARGIN_DEFAULT:
+            self._other_data.pop(self.PARALLEL_MARGIN_KEY, None)
+        else:
+            self._other_data[self.PARALLEL_MARGIN_KEY] = int(value)
+        if getattr(self, "imagePath", None):
+            self.setDirty()
+
+    def _apply_image_settings(self) -> None:
+        """Restore the per-image settings stored in the label file."""
+        value = self.PARALLEL_MARGIN_DEFAULT
+        if isinstance(self._other_data, dict):
+            stored = self._other_data.get(self.PARALLEL_MARGIN_KEY)
+            if isinstance(stored, (int, float)):
+                value = int(round(stored / 10.0)) * 10
+                value = min(300, max(10, value))
+        self._applying_image_settings = True
+        try:
+            self.parallelMarginWidget.setValue(value)
+            # setValue is a no-op when the value is unchanged, so push it
+            self.canvas.setParallelLineMarginRatio(value / 100.0)
+        finally:
+            self._applying_image_settings = False
+
     def _store_image_data_toggled(self, checked: bool) -> None:
         self._config["store_data"] = bool(checked)
         if hasattr(self, "actions") and hasattr(self.actions, "saveWithImageData"):
@@ -4100,11 +4179,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.labelFile.imagePath,
             )
             self._other_data = self.labelFile.otherData
+            self._apply_image_settings()
         else:
             self.imageData = LabelFile.load_image_file(filename)
             if self.imageData:
                 self.imagePath = filename
             self.labelFile = None
+            self._apply_image_settings()   # no label file: back to the default
         assert self.imageData is not None
         image = QtGui.QImage.fromData(self.imageData)
 
