@@ -136,6 +136,63 @@ class _FileListItemDelegate(QtWidgets.QStyledItemDelegate):
             painter.restore()
 
 
+class _SizeOutlierDialog(QtWidgets.QDialog):
+    """Pick a sigma and the labels to look for size outliers in."""
+
+    def __init__(self, parent, labels, title=None, with_sigma=True):
+        super().__init__(parent)
+        self.setWindowTitle(title or self.tr("サイズ外れ値ポリゴンを選択"))
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self._sigma = None
+        if with_sigma:
+            self._build_sigma_row(layout)
+        self._build_label_list(layout, labels)
+        self._build_buttons(layout)
+
+    def _build_sigma_row(self, layout):
+        sigma_row = QtWidgets.QHBoxLayout()
+        sigma_row.addWidget(QtWidgets.QLabel(self.tr("σ値")))
+        self._sigma = QtWidgets.QDoubleSpinBox()
+        self._sigma.setRange(0.1, 5.0)
+        self._sigma.setSingleStep(0.1)
+        self._sigma.setDecimals(1)
+        self._sigma.setValue(2.0)
+        sigma_row.addWidget(self._sigma)
+        sigma_row.addStretch(1)
+        layout.addLayout(sigma_row)
+
+    def _build_label_list(self, layout, labels):
+        layout.addWidget(QtWidgets.QLabel(self.tr("対象クラス")))
+        self._boxes = []
+        holder = QtWidgets.QWidget()
+        holder_layout = QtWidgets.QVBoxLayout(holder)
+        holder_layout.setContentsMargins(0, 0, 0, 0)
+        for label in labels:
+            box = QtWidgets.QCheckBox(label or self.tr("(ラベルなし)"))
+            self._boxes.append((label, box))
+            holder_layout.addWidget(box)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(holder)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(min(240, 40 + 24 * len(labels)))
+        layout.addWidget(scroll)
+
+    def _build_buttons(self, layout):
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def sigma(self):
+        return float(self._sigma.value()) if self._sigma is not None else 0.0
+
+    def selectedLabels(self):
+        return [label for label, box in self._boxes if box.isChecked()]
+
+
 class MainWindow(QtWidgets.QMainWindow):
     _config_file: Path | None
     _config: dict
@@ -772,11 +829,27 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         removeHighIouShapes = action(
-            self.tr("IoU0.9超の\nポリゴン削除"),
-            self.removeHighIouShapes,
+            self.tr("IoU0.9超の\nポリゴン一括選択"),
+            self.selectHighIouShapes,
             None,
             "remove-duplicate-polygon.svg",
-            self.tr("IoUが0.9を超える重複ポリゴンのうち後に作られた方を削除"),
+            self.tr("IoUが0.9を超える重複ポリゴンのうち後に作られた方を選択"),
+            enabled=False,
+        )
+        selectContainedShapes = action(
+            self.tr("他ポリゴンに\n含まれるものを選択"),
+            self.selectContainedShapes,
+            None,
+            "remove-duplicate-polygon.svg",
+            self.tr("同じクラスの別のポリゴンに収まっているポリゴンを選択"),
+            enabled=False,
+        )
+        selectSizeOutlierShapes = action(
+            self.tr("サイズ外れ値\nポリゴン一括選択"),
+            self.selectSizeOutlierShapes,
+            None,
+            "remove-duplicate-polygon.svg",
+            self.tr("クラスごとの大きさから外れたポリゴンを選択"),
             enabled=False,
         )
         copyFromSpecifiedJson = action(
@@ -965,8 +1038,20 @@ class MainWindow(QtWidgets.QMainWindow):
             checked=True,
         )
         showRemoveHighIouShapes = action(
-            self.tr("IoU0.9超のポリゴン削除ボタンを表示"),
+            self.tr("IoU0.9超のポリゴン一括選択ボタンを表示"),
             self._toggle_remove_high_iou_visible,
+            checkable=True,
+            checked=True,
+        )
+        showSelectContained = action(
+            self.tr("他ポリゴンに含まれるポリゴン一括選択ボタンを表示"),
+            self._toggle_select_contained_visible,
+            checkable=True,
+            checked=True,
+        )
+        showSelectSizeOutliers = action(
+            self.tr("サイズ外れ値ポリゴン一括選択ボタンを表示"),
+            self._toggle_select_size_outliers_visible,
             checkable=True,
             checked=True,
         )
@@ -1490,6 +1575,8 @@ class MainWindow(QtWidgets.QMainWindow):
             showRectToTriangle=showRectToTriangle,
             showDeleteAllShapes=showDeleteAllShapes,
             showRemoveHighIouShapes=showRemoveHighIouShapes,
+            showSelectSizeOutliers=showSelectSizeOutliers,
+            showSelectContained=showSelectContained,
             showCopyFromSpecifiedJson=showCopyFromSpecifiedJson,
             showCopyFromPrevJson=showCopyFromPrevJson,
             showAddBase64ToAllJsons=showAddBase64ToAllJsons,
@@ -1498,6 +1585,8 @@ class MainWindow(QtWidgets.QMainWindow):
             openPrevImg=openPrevImg,
             deleteAllShapes=deleteAllShapes,
             removeHighIouShapes=removeHighIouShapes,
+            selectSizeOutlierShapes=selectSizeOutlierShapes,
+            selectContainedShapes=selectContainedShapes,
             copyFromSpecifiedJson=copyFromSpecifiedJson,
             copyFromPrevJson=copyFromPrevJson,
             addBase64ToAllJsons=addBase64ToAllJsons,
@@ -1543,6 +1632,8 @@ class MainWindow(QtWidgets.QMainWindow):
             brightnessContrast,
             deleteAllShapes,
             removeHighIouShapes,
+            selectSizeOutlierShapes,
+            selectContainedShapes,
             copyFromSpecifiedJson,
             copyFromPrevJson,
             addBase64ToAllJsons,
@@ -1713,6 +1804,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     rectToTriangle,
                     deleteAllShapes,
                     removeHighIouShapes,
+                    selectSizeOutlierShapes,
+                    selectContainedShapes,
                     copyFromSpecifiedJson,
                     copyFromPrevJson,
                     addBase64ToAllJsons,
@@ -1918,6 +2011,10 @@ class MainWindow(QtWidgets.QMainWindow):
              self._toggle_delete_all_shapes_visible, True),
             ("view/showRemoveHighIouShapes", "showRemoveHighIouShapes",
              self._toggle_remove_high_iou_visible, True),
+            ("view/showSelectSizeOutliers", "showSelectSizeOutliers",
+             self._toggle_select_size_outliers_visible, True),
+            ("view/showSelectContained", "showSelectContained",
+             self._toggle_select_contained_visible, True),
             ("view/showCopyFromSpecifiedJson", "showCopyFromSpecifiedJson",
              self._toggle_copy_from_specified_json_visible, True),
             ("view/showCopyFromPrevJson", "showCopyFromPrevJson",
@@ -3228,8 +3325,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.information(self, title, summary)
 
-    def removeHighIouShapes(self):
-        """Remove duplicate shapes whose IoU exceeds 0.9, keeping the older one."""
+    def selectHighIouShapes(self):
+        """Select duplicate shapes whose IoU exceeds 0.9, keeping the older one."""
         shapes = self.canvas.shapes
         if len(shapes) < 2:
             return
@@ -3301,47 +3398,156 @@ class MainWindow(QtWidgets.QMainWindow):
         if not to_remove:
             QtWidgets.QMessageBox.information(
                 self,
-                self.tr("IoU0.9超シェイプを除去"),
+                self.tr("IoU0.9超シェイプを選択"),
                 self.tr("IoU0.9超の重複シェイプはありません。"),
             )
             return
 
-        count = len(to_remove)
-        yes = QtWidgets.QMessageBox.Yes
-        no = QtWidgets.QMessageBox.No
-        result = QtWidgets.QMessageBox.question(
-            self,
-            self.tr("IoU0.9超シェイプを除去"),
-            self.tr("IoU0.9超の重複シェイプが%d個あります。除去しますか？") % count,
-            yes | no,
-            yes,
-        )
-        if result != yes:
-            return
-
-        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            removed_shapes = [shapes[idx] for idx in sorted(to_remove, reverse=True)]
-            # Remove them as a single transaction: deleteShape() snapshots
-            # after every shape, so a bulk removal used to push the earlier
-            # states out of the (10 deep) undo stack and become unrecoverable.
-            remaining = [s for s in self.canvas.shapes if s not in set(removed_shapes)]
-            self.canvas.shapes = remaining
-            self.canvas.selectedShapes = [
-                s for s in self.canvas.selectedShapes if s in set(remaining)
-            ]
-            self.canvas.sortShapesByArea()
-            self.canvas._clearStaleHoverState()
-            self.canvas.storeShapes()
-            self.canvas.update()
-            self.remLabels(removed_shapes)
-            self.setDirty()
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        found = [shapes[idx] for idx in sorted(to_remove)]
+        self.canvas.selectShapes(found)
         QtWidgets.QMessageBox.information(
             self,
-            self.tr("IoU0.9超シェイプを除去"),
-            self.tr("%d個のシェイプを除去しました。") % count,
+            self.tr("IoU0.9超シェイプを選択"),
+            self.tr("IoU0.9超の重複シェイプを%d個選択しました。") % len(found),
+        )
+
+    def selectSizeOutlierShapes(self):
+        """Select shapes whose size is an outlier for their own label."""
+        shapes = [s for s in self.canvas.shapes if s.points]
+        if not shapes:
+            return
+
+        sizes: dict[str, list] = {}
+        for shape in shapes:
+            rect = shape.boundingRect()
+            sizes.setdefault(shape.label or "", []).append(
+                (shape, abs(rect.width() * rect.height()))
+            )
+        labels = sorted(sizes)
+        if not labels:
+            return
+
+        dialog = _SizeOutlierDialog(self, labels)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        sigma = dialog.sigma()
+        chosen = dialog.selectedLabels()
+        if not chosen:
+            return
+
+        found = []
+        skipped = []
+        for label in chosen:
+            entries = sizes.get(label, [])
+            if len(entries) < 2:
+                skipped.append(label)
+                continue
+            values = [area for _shape, area in entries]
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            std = variance ** 0.5
+            if std <= 0:
+                continue
+            limit = sigma * std
+            found.extend(
+                shape for shape, area in entries if abs(area - mean) > limit
+            )
+
+        title = self.tr("サイズ外れ値ポリゴンを選択")
+        if not found:
+            note = ""
+            if skipped:
+                note = "\n\n" + self.tr(
+                    "ポリゴンが1個だけのクラスは対象外です: %s"
+                ) % ", ".join(skipped)
+            QtWidgets.QMessageBox.information(
+                self, title,
+                self.tr("%.1fσを超えるポリゴンはありません。") % sigma + note,
+            )
+            return
+        self.canvas.selectShapes(found)
+        QtWidgets.QMessageBox.information(
+            self, title,
+            self.tr("%.1fσを超えるポリゴンを%d個選択しました。")
+            % (sigma, len(found)),
+        )
+
+    #: how much of a shape has to sit inside another one to count as contained
+    CONTAINED_RATIO = 0.95
+
+    def selectContainedShapes(self):
+        """Select shapes that sit inside another shape carrying the same label."""
+        shapes = [s for s in self.canvas.shapes if s.points]
+        if len(shapes) < 2:
+            return
+
+        boxes: dict[str, list] = {}
+        for shape in shapes:
+            rect = shape.boundingRect()
+            boxes.setdefault(shape.label or "", []).append(
+                (shape, rect.x(), rect.y(), rect.right(), rect.bottom())
+            )
+        labels = sorted(boxes)
+        if not labels:
+            return
+
+        title = self.tr("他ポリゴンに含まれるポリゴンを選択")
+        dialog = _SizeOutlierDialog(self, labels, title=title, with_sigma=False)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        chosen = dialog.selectedLabels()
+        if not chosen:
+            return
+
+        found = []
+        for label in chosen:
+            entries = boxes.get(label, [])
+            if len(entries) < 2:
+                continue
+            # x-sorted sweep: two shapes can only contain one another if
+            # their x ranges overlap, so the scan stops as soon as they part.
+            entries = sorted(entries, key=lambda e: e[1])
+            contained = set()
+
+            def _inside(inner, outer):
+                _s, x1, y1, x2, y2 = inner
+                _o, ox1, oy1, ox2, oy2 = outer
+                area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                if area <= 0:
+                    return False
+                other_area = max(0.0, ox2 - ox1) * max(0.0, oy2 - oy1)
+                if other_area <= area:
+                    return False  # the container has to be the bigger one
+                inter = (
+                    max(0.0, min(x2, ox2) - max(x1, ox1))
+                    * max(0.0, min(y2, oy2) - max(y1, oy1))
+                )
+                return inter / area >= self.CONTAINED_RATIO
+
+            for i, entry in enumerate(entries):
+                x2 = entry[3]
+                for j in range(i + 1, len(entries)):
+                    other = entries[j]
+                    if other[1] > x2:
+                        break  # x ranges no longer overlap
+                    if id(entry[0]) not in contained and _inside(entry, other):
+                        contained.add(id(entry[0]))
+                        found.append(entry[0])
+                    if id(other[0]) not in contained and _inside(other, entry):
+                        contained.add(id(other[0]))
+                        found.append(other[0])
+
+        if not found:
+            QtWidgets.QMessageBox.information(
+                self, title,
+                self.tr("他のポリゴンに含まれるポリゴンはありません。"),
+            )
+            return
+        self.canvas.selectShapes(found)
+        QtWidgets.QMessageBox.information(
+            self, title,
+            self.tr("他のポリゴンに含まれるポリゴンを%d個選択しました。")
+            % len(found),
         )
 
     def copyShapesFromSpecifiedJson(self):
@@ -3912,6 +4118,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_remove_high_iou_visible(self, checked: bool) -> None:
         self._toggle_toolbar_button_visible(
             self.actions.removeHighIouShapes, checked
+        )
+
+    def _toggle_select_size_outliers_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.selectSizeOutlierShapes, checked
+        )
+
+    def _toggle_select_contained_visible(self, checked: bool) -> None:
+        self._toggle_toolbar_button_visible(
+            self.actions.selectContainedShapes, checked
         )
 
     def _toggle_copy_from_specified_json_visible(self, checked: bool) -> None:
@@ -5533,11 +5749,21 @@ def _scan_image_files(root_dir: str) -> list[str]:
 
     _num_re = re.compile(r"(\d+)")
 
-    def natsort_like_key(p: str):
+    def natsort_like_key(p: str, collate=locale.strxfrm):
         name = Path(p).name
         parts = _num_re.split(name)
         return tuple(
-            int(x) if x.isdigit() else locale.strxfrm(x.lower()) for x in parts
+            int(x) if x.isdigit() else collate(x.lower()) for x in parts
         )
 
-    return sorted(images, key=natsort_like_key)
+    try:
+        return sorted(images, key=natsort_like_key)
+    except (OSError, ValueError) as e:
+        # locale.strxfrm raises OSError(EINVAL) on macOS for characters the
+        # collation cannot handle, which used to take the whole app down when
+        # such a file name was in the directory. Sort without it instead: the
+        # order is plain code point order, but nothing is lost.
+        logger.warning(
+            "locale-aware sorting failed ({}); falling back to a plain sort", e
+        )
+        return sorted(images, key=lambda p: natsort_like_key(p, collate=str))
