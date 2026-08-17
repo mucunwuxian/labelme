@@ -193,14 +193,30 @@ class LabelFile:
             with open(filename, "r") as f:
                 data = json.load(f)
 
+            imagePath = data["imagePath"]
             if data["imageData"] is not None:
                 imageData = base64.b64decode(data["imageData"])
             else:
                 # relative path from label file to relative path from cwd
-                imagePath = osp.join(osp.dirname(filename), data["imagePath"])
-                imageData = self.load_image_file(imagePath)
+                resolved = osp.join(osp.dirname(filename), imagePath)
+                if not osp.exists(resolved) and osp.dirname(imagePath):
+                    # The images were flattened after they were annotated:
+                    # imagePath still carries the old subfolder. Look for the
+                    # image beside the label file before giving up.
+                    beside = osp.join(osp.dirname(filename), osp.basename(imagePath))
+                    if osp.exists(beside):
+                        logger.warning(
+                            "imagePath {!r} is missing; using {!r} instead",
+                            imagePath, osp.basename(imagePath),
+                        )
+                        resolved = beside
+                        imagePath = osp.basename(imagePath)
+                imageData = self.load_image_file(resolved)
+                if imageData is None:
+                    raise FileNotFoundError(
+                        f"image for {filename!r} not found: {resolved!r}"
+                    )
             flags = data.get("flags") or {}
-            imagePath = data["imagePath"]
             self._check_image_height_and_width(
                 imageData,
                 data.get("imageHeight"),
