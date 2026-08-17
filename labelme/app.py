@@ -224,6 +224,9 @@ class MainWindow(QtWidgets.QMainWindow):
     _zoom_values: dict[str, tuple[_ZoomMode, int]]
     _brightness_contrast_values: dict[str, tuple[int | None, int | None]]
     _prev_opened_dir: str | None
+    #: root of the directory currently loaded, used to mirror subfolders into
+    #: output_dir. Unlike _prev_opened_dir this is not a remembered setting.
+    _active_image_root: str | None
     _initially_annotated_files: set[str]  # Files already annotated when dir was opened
     _current_file_row: int  # Row index of the currently loaded file in the file list
     _other_data: dict | None
@@ -295,6 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList = LabelListWidget()
         self.labelList.setStyleSheet("QListView::item { min-height: 24px; padding: 2px 0px; }")
         self._prev_opened_dir = None
+        self._active_image_root = None
         self._initially_annotated_files: set[str] = set()
         self._current_file_row: int = -1
         self._file_mtimes = {}
@@ -4394,15 +4398,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 osp.dirname(label_file),
                 self.labelFile.imagePath,
             )
+            if self.imageData is None and not osp.exists(self.imagePath):
+                # A label file written on another machine can carry an
+                # absolute imagePath from that machine's home directory, which
+                # osp.join keeps as-is. Look for the image next to the label
+                # file instead of failing.
+                fallback = osp.join(
+                    osp.dirname(label_file), osp.basename(self.labelFile.imagePath)
+                )
+                if fallback != self.imagePath and osp.exists(fallback):
+                    logger.warning(
+                        "imagePath {!r} does not exist; using {!r}",
+                        self.imagePath, fallback,
+                    )
+                    self.imagePath = fallback
+                    self.imageData = LabelFile.load_image_file(fallback)
             self._other_data = self.labelFile.otherData
             self._apply_image_settings()
         else:
-            self.imageData = LabelFile.load_image_file(filename)
+            self.imageData = (
+                LabelFile.load_image_file(filename) if filename else None
+            )
             if self.imageData:
                 self.imagePath = filename
             self.labelFile = None
             self._apply_image_settings()   # no label file: back to the default
-        assert self.imageData is not None
+        if self.imageData is None:
+            # PIL could not open the image (missing, unreadable, truncated, or
+            # a JSON whose imagePath no longer resolves). This used to hit an
+            # assert and take the whole app down mid-annotation.
+            missing = getattr(self, "imagePath", None) or filename
+            self.errorMessage(
+                self.tr("Error opening file"),
+                self.tr(
+                    "<p>Could not read the image for <b>{0}</b>.</p>"
+                    "<p>Tried: <i>{1}</i></p>"
+                    "<p>Check that the file exists and is a readable image.</p>"
+                ).format(filename, missing),
+            )
+            self.show_status_message(self.tr("Error reading %s") % missing)
+            return False
         image = QtGui.QImage.fromData(self.imageData)
 
         if image.isNull():
@@ -4856,9 +4891,61 @@ class MainWindow(QtWidgets.QMainWindow):
             label_file = image_path
         else:
             label_file = f"{osp.splitext(image_path)[0]}{LabelFile.suffix}"
-        if self.output_dir:
-            label_file = osp.join(self.output_dir, osp.basename(label_file))
-        return label_file
+        if not self.output_dir:
+            return label_file
+        canonical = self._canonicalOutputLabelFile(label_file)
+        legacy = self._legacyFlatLabelFile(label_file, image_path, canonical)
+        return legacy if legacy is not None else canonical
+
+    def _canonicalOutputLabelFile(self, label_file: str) -> str:
+        """Where a label file belongs under output_dir.
+
+        A directory is opened recursively, so two subfolders can hold images
+        with the same name. Keeping only the basename made them share one
+        label file: annotations from both ended up in it and imagePath
+        pointed at whichever was saved last. Mirror the subfolder instead.
+        Depends only on the paths, never on which files happen to exist.
+        """
+        root = self._active_image_root
+        if root:
+            try:
+                relative = osp.relpath(label_file, root)
+            except ValueError:
+                relative = None  # different drive on Windows
+            if relative and not relative.startswith(os.pardir + os.sep):
+                return osp.join(self.output_dir, relative)
+        return osp.join(self.output_dir, osp.basename(label_file))
+
+    def _legacyFlatLabelFile(self, label_file, image_path, canonical):
+        """A pre-existing flat label file in output_dir, if it is really ours.
+
+        Older versions wrote every label file directly into output_dir. Those
+        are still used, but only when they can be shown to belong to this
+        image - otherwise two images with the same name would keep sharing
+        one file, which is the bug the mirroring fixes.
+        """
+        flat = osp.join(self.output_dir, osp.basename(label_file))
+        if flat == canonical or osp.exists(canonical) or not osp.exists(flat):
+            return None
+        try:
+            with open(flat, encoding="utf-8") as f:
+                stored = json.load(f).get("imagePath")
+        except Exception as e:  # noqa: BLE001 - unreadable: treat as not ours
+            logger.warning("could not read {!r} to check its image: {}", flat, e)
+            return None
+        if not stored:
+            return None
+        referenced = osp.join(osp.dirname(flat), stored)
+        try:
+            if osp.samefile(referenced, image_path):
+                return flat
+        except OSError:
+            pass
+        logger.warning(
+            "{!r} refers to {!r}, not {!r}; writing {!r} instead",
+            flat, stored, image_path, canonical,
+        )
+        return None
 
     def getLabelFile(self):
         assert self.filename is not None
@@ -5606,6 +5693,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self._prev_opened_dir = root_dir
+        self._active_image_root = root_dir
         self._initially_annotated_files = set()  # Reset when opening new directory
         self._file_mtimes = {}
         self._file_mtime_range = None

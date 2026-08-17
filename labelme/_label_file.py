@@ -142,8 +142,14 @@ class LabelFile:
     def load_image_file(filename):
         try:
             image_pil = PIL.Image.open(filename)
-        except OSError:
-            logger.error(f"Failed opening image file: {filename}")
+        except OSError as e:
+            # Keep the reason: "no such file", "operation not permitted" (a
+            # macOS folder-access prompt that was declined) and "cannot
+            # identify image file" all land here and need different fixes.
+            logger.error(
+                "Failed opening image file: {!r} ({}: {})",
+                filename, type(e).__name__, e,
+            )
             return
 
         # apply orientation to image according to exif
@@ -156,8 +162,11 @@ class LabelFile:
             try:
                 with builtins.open(filename, "rb") as f:
                     return f.read()
-            except OSError:
-                logger.error(f"Failed reading image file: {filename}")
+            except OSError as e:
+                logger.error(
+                    "Failed reading image file: {!r} ({}: {})",
+                    filename, type(e).__name__, e,
+                )
                 return
 
         with io.BytesIO() as f:
